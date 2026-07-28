@@ -19,6 +19,7 @@ import {
   shutdownProviderManager,
 } from '@/shared/provider/manager';
 import { getPreviewManager } from '@/shared/services/preview';
+import { closeAllAcpRuntimes } from '@/shared/services/acp';
 
 const app = new Hono();
 
@@ -68,9 +69,16 @@ const port = Number(process.env.PORT) || 2026;
 
 // Store server instance for hot reload cleanup
 let server: ServerType | null = null;
+let cleanupPromise: Promise<void> | null = null;
 
 // Cleanup function
-const cleanup = async () => {
+const cleanup = () => {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+  // ACP agents are long-lived child processes. They must be stopped before a
+  // dev-server restart or the old process keeps the watcher from relaunching.
+  closeAllAcpRuntimes();
+
   // Stop all preview servers
   try {
     const previewManager = getPreviewManager();
@@ -87,19 +95,20 @@ const cleanup = async () => {
   }
 
   if (server) {
-    server.close();
+    const activeServer = server;
     server = null;
+    await new Promise<void>((resolve) => activeServer.close(() => resolve()));
   }
+  })();
+  return cleanupPromise;
 };
 
 // Handle hot reload - close existing server
-process.on('SIGTERM', () => cleanup());
-process.on('SIGINT', () => cleanup());
-
-// For tsx watch - handle the restart signal
-if (process.env.NODE_ENV !== 'production') {
-  process.on('exit', () => cleanup());
-}
+const shutdown = () => {
+  void cleanup().finally(() => process.exit(0));
+};
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
 
 // Initialize and start server
 async function start() {
@@ -107,6 +116,10 @@ async function start() {
 
   // Load configuration
   await loadConfig();
+
+  // Install built-in skills to ~/.workany/skills/
+  const { installBuiltinSkills } = await import('@/shared/skills/loader');
+  await installBuiltinSkills();
 
   // Initialize provider manager
   await initProviderManager();

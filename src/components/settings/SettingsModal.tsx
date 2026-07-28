@@ -20,6 +20,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { categoryIcons } from './constants';
 import { AboutSettings } from './tabs/AboutSettings';
 import { AccountSettings } from './tabs/AccountSettings';
+import { AgentSettings } from './tabs/AgentSettings';
 import { DataSettings } from './tabs/DataSettings';
 import { GeneralSettings } from './tabs/GeneralSettings';
 import { MCPSettings } from './tabs/MCPSettings';
@@ -63,6 +64,7 @@ export function SettingsModal({
     'general',
     'workplace',
     'model',
+    'agent',
     'mcp',
     'skills',
     'data',
@@ -105,16 +107,16 @@ export function SettingsModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="h-[600px] max-w-4xl gap-0 overflow-hidden p-0">
+      <DialogContent className="h-[min(680px,calc(100vh-32px))] w-[min(1120px,calc(100vw-32px))] max-w-none gap-0 overflow-hidden p-0">
         <DialogTitle className="sr-only">{t.settings.title}</DialogTitle>
 
         <div className="flex h-full min-h-0">
           {/* Left Navigation */}
-          <div className="border-border bg-muted/30 flex w-56 flex-col border-r">
+          <div className="border-border bg-muted/30 flex w-16 shrink-0 flex-col border-r sm:w-48 lg:w-56">
             {/* Logo Header */}
-            <div className="border-border flex items-center gap-2.5 border-b px-4 py-4">
-              <img src={ImageLogo} alt="WorkAny" className="size-7" />
-              <span className="text-foreground text-base font-semibold">
+            <div className="border-border flex items-center justify-center gap-2.5 border-b px-2 py-4 sm:justify-start sm:px-4">
+              <img src={ImageLogo} alt="WorkAny" className="size-7 shrink-0" />
+              <span className="text-foreground hidden truncate text-base font-semibold sm:block">
                 WorkAny
               </span>
             </div>
@@ -126,16 +128,17 @@ export function SettingsModal({
                 return (
                   <button
                     key={id}
+                    title={getCategoryLabel(id)}
                     onClick={() => setActiveCategory(id)}
                     className={cn(
-                      'flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors duration-200 focus:outline-none focus-visible:outline-none',
+                      'flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg px-2 py-2 text-sm transition-colors duration-200 focus:outline-none focus-visible:outline-none sm:justify-start sm:px-3',
                       activeCategory === id
                         ? 'bg-accent text-accent-foreground font-medium'
                         : 'text-foreground/70 hover:bg-accent/50 hover:text-foreground'
                     )}
                   >
-                    <Icon className="size-4" />
-                    <span className="flex-1 text-left">
+                    <Icon className="size-4 shrink-0" />
+                    <span className="hidden min-w-0 flex-1 truncate text-left sm:block">
                       {getCategoryLabel(id)}
                     </span>
                   </button>
@@ -147,14 +150,14 @@ export function SettingsModal({
           {/* Right Content */}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {/* Header */}
-            <div className="border-border flex shrink-0 items-center justify-between border-b px-6 py-4">
+            <div className="border-border flex shrink-0 items-center justify-between border-b px-4 py-4 sm:px-6">
               <h2 className="text-foreground text-lg font-semibold">
                 {getCategoryLabel(activeCategory)}
               </h2>
             </div>
 
             {/* Content Area */}
-            <div className="min-h-0 flex-1 overflow-y-auto p-6">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
               {activeCategory === 'account' && (
                 <AccountSettings
                   settings={settings}
@@ -179,6 +182,13 @@ export function SettingsModal({
 
               {activeCategory === 'model' && (
                 <ModelSettings
+                  settings={settings}
+                  onSettingsChange={handleSettingsChange}
+                />
+              )}
+
+              {activeCategory === 'agent' && (
+                <AgentSettings
                   settings={settings}
                   onSettingsChange={handleSettingsChange}
                 />

@@ -6,6 +6,11 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  getSettings,
+  saveSettingsWithSync,
+  type ConversationMode,
+} from '@/shared/db/settings';
 import type { MessageAttachment } from '@/shared/hooks/useAgent';
 import { cn } from '@/shared/lib/utils';
 import { useLanguage } from '@/shared/providers/language-provider';
@@ -26,12 +31,23 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
+import { AgentModeSelector } from './AgentModeSelector';
+import { ModelSelector } from './ModelSelector';
+
+export type ChatMode = ConversationMode;
+
 // Attachment type for files and images
 export interface Attachment {
   id: string;
   file: File;
   type: 'image' | 'file';
   preview?: string; // Data URL for image preview
+  nativePath?: string; // Native file path from Tauri drag-drop
+}
+export interface CategoryTag {
+  icon: React.ReactNode;
+  label: string;
+  onClose: () => void;
 }
 
 export interface ChatInputProps {
@@ -39,8 +55,12 @@ export interface ChatInputProps {
   placeholder?: string;
   /** Whether the agent is running */
   isRunning?: boolean;
-  /** Callback when submitting with text and attachments */
-  onSubmit: (text: string, attachments?: MessageAttachment[]) => Promise<void>;
+  /** Callback when submitting with text, attachments, and mode */
+  onSubmit: (
+    text: string,
+    attachments?: MessageAttachment[],
+    mode?: ChatMode
+  ) => Promise<void>;
   /** Callback when stop button is clicked */
   onStop?: () => void;
   /** Variant: 'home' for larger home page style, 'reply' for compact reply style */
@@ -51,11 +71,22 @@ export interface ChatInputProps {
   disabled?: boolean;
   /** Auto focus on mount */
   autoFocus?: boolean;
+  /** Externally controlled value */
+  externalValue?: string;
+  /** Callback when external value is consumed */
+  onExternalValueConsumed?: () => void;
+  /** Category tag shown next to the + button */
+  categoryTag?: CategoryTag;
+  /** Default mode for the mode selector */
+  defaultMode?: ChatMode;
 }
 
 // Generate unique ID for attachments
 const generateId = () =>
   `attachment_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+// Module-level guard: prevent the same drop event from being handled by multiple ChatInput instances
+let lastDropTimestamp = 0;
 
 // Check if file is an image (by MIME type or file extension)
 const isImageFile = (file: File) => {
@@ -96,14 +127,67 @@ export function ChatInput({
   className,
   disabled = false,
   autoFocus = false,
+  externalValue,
+  onExternalValueConsumed,
+  categoryTag,
+  defaultMode,
 }: ChatInputProps) {
   const { t } = useLanguage();
   const [value, setValue] = useState('');
+  const [chatMode, setChatMode] = useState<ChatMode>(() => {
+    const settings = getSettings();
+    const preferred = defaultMode || settings.lastChatMode;
+    if (preferred === 'chat') return preferred;
+    if (
+      preferred?.startsWith('agent:') &&
+      settings.agentRuntimes.some(
+        (runtime) => runtime.id === preferred.slice(6) && runtime.enabled
+      )
+    ) {
+      return preferred;
+    }
+    const fallback = settings.agentRuntimes.find(
+      (runtime) =>
+        runtime.id === settings.defaultAgentRuntime && runtime.enabled
+    );
+    return fallback ? `agent:${fallback.id}` : 'chat';
+  });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
   const prevIsRunningRef = useRef(isRunning);
+
+  const selectChatMode = useCallback((mode: ChatMode) => {
+    setChatMode(mode);
+    const current = getSettings();
+    const next = {
+      ...current,
+      lastChatMode: mode,
+      defaultAgentRuntime: mode.startsWith('agent:')
+        ? mode.slice(6)
+        : current.defaultAgentRuntime,
+    };
+    void saveSettingsWithSync(next);
+  }, []);
+
+  // Sync external value into the input
+  useEffect(() => {
+    if (externalValue !== undefined && externalValue !== '') {
+      setValue(externalValue);
+      onExternalValueConsumed?.();
+      // Focus and move cursor to end
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          textareaRef.current.selectionStart = externalValue.length;
+          textareaRef.current.selectionEnd = externalValue.length;
+        }
+      }, 0);
+    }
+  }, [externalValue, onExternalValueConsumed]);
 
   // Auto focus on mount if autoFocus is true
   useEffect(() => {
@@ -204,45 +288,211 @@ export function ChatInput({
     [addFiles]
   );
 
+  // Add files from native file paths (Tauri drag-drop)
+  const addFilesFromPaths = useCallback(
+    async (paths: string[]) => {
+      if (isRunning || disabled) return;
+
+      const newAttachments: Attachment[] = [];
+      for (const filePath of paths) {
+        const name =
+          filePath.split('/').pop() || filePath.split('\\').pop() || filePath;
+        const ext = name.split('.').pop()?.toLowerCase() || '';
+        const imageExts = [
+          'jpg',
+          'jpeg',
+          'png',
+          'gif',
+          'webp',
+          'bmp',
+          'svg',
+          'ico',
+        ];
+        const isImage = imageExts.includes(ext);
+
+        // Create a minimal File object with the path stored in name
+        // The actual content will be read later via Tauri FS when converting to MessageAttachment
+        const mimeType = isImage
+          ? `image/${ext === 'jpg' ? 'jpeg' : ext}`
+          : ext === 'pdf'
+            ? 'application/pdf'
+            : ext === 'json'
+              ? 'application/json'
+              : ext === 'csv'
+                ? 'text/csv'
+                : 'application/octet-stream';
+
+        const attachment: Attachment = {
+          id: generateId(),
+          file: new File([], name, { type: mimeType }),
+          type: isImage ? 'image' : 'file',
+          nativePath: filePath,
+        };
+
+        if (isImage) {
+          try {
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            const bytes = await readFile(filePath);
+            const blob = new Blob([bytes], { type: mimeType });
+            const dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(blob);
+            });
+            attachment.preview = dataUrl;
+            // Also create a proper File object with data for later use
+            attachment.file = new File([bytes], name, { type: mimeType });
+          } catch (error) {
+            console.error('[ChatInput] Failed to read image:', error);
+          }
+        } else {
+          try {
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            const bytes = await readFile(filePath);
+            attachment.file = new File([bytes], name, { type: mimeType });
+          } catch (error) {
+            console.error('[ChatInput] Failed to read file:', error);
+          }
+        }
+
+        newAttachments.push(attachment);
+      }
+
+      if (newAttachments.length > 0) {
+        setAttachments((prev) => [...prev, ...newAttachments]);
+      }
+    },
+    [isRunning, disabled]
+  );
+
+  // Tauri native drag-drop event listener
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    const setupDragDrop = async () => {
+      // Only in Tauri environment
+      if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window))
+        return;
+
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        const webview = getCurrentWebview();
+
+        unlisten = await webview.onDragDropEvent((event) => {
+          const container = containerRef.current;
+          if (!container) return;
+
+          const rect = container.getBoundingClientRect();
+
+          if (event.payload.type === 'enter') {
+            // Files are being dragged into the window — no position check needed yet
+            setIsDragging(true);
+          } else if (event.payload.type === 'over') {
+            const { x, y } = event.payload.position;
+            const isOver =
+              x >= rect.left &&
+              x <= rect.right &&
+              y >= rect.top &&
+              y <= rect.bottom;
+            setIsDragging(isOver);
+          } else if (event.payload.type === 'drop') {
+            setIsDragging(false);
+            const now = Date.now();
+            const { x, y } = event.payload.position;
+            const isOver =
+              x >= rect.left &&
+              x <= rect.right &&
+              y >= rect.top &&
+              y <= rect.bottom;
+            // Guard: only one ChatInput instance handles each drop
+            if (
+              isOver &&
+              event.payload.paths.length > 0 &&
+              now - lastDropTimestamp > 100
+            ) {
+              lastDropTimestamp = now;
+              addFilesFromPaths(event.payload.paths);
+            }
+          } else if (event.payload.type === 'leave') {
+            setIsDragging(false);
+          }
+        });
+      } catch (error) {
+        console.error('[ChatInput] Failed to setup Tauri drag-drop:', error);
+      }
+    };
+
+    setupDragDrop();
+    return () => {
+      unlisten?.();
+    };
+  }, [addFilesFromPaths]);
+
   // Open file picker
   const openFilePicker = () => {
     fileInputRef.current?.click();
   };
 
+  // Read a File object as base64 data URL
+  const readFileAsBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  };
+
   // Convert attachments to MessageAttachment format
-  const convertToMessageAttachments = (): MessageAttachment[] | undefined => {
+  const convertToMessageAttachments = async (): Promise<
+    MessageAttachment[] | undefined
+  > => {
     if (attachments.length === 0) return undefined;
 
-    const result = attachments
-      .filter((a) => {
-        // For images, only include if preview exists and has data
-        if (a.type === 'image') {
-          const hasPreview = a.preview && a.preview.length > 0;
-          if (!hasPreview) {
-            console.warn(
-              `[ChatInput] Skipping image ${a.file.name}: no preview data`
-            );
-          }
-          return hasPreview;
-        }
-        return true; // Keep non-image files
-      })
-      .map((a) => {
-        // Determine mimeType with fallback for clipboard pastes where file.type might be empty
-        let mimeType = a.file.type;
-        if (!mimeType && a.type === 'image') {
-          // Default to png for images without type (common for clipboard pastes)
-          mimeType = 'image/png';
-        }
+    const result: MessageAttachment[] = [];
 
-        return {
-          id: a.id,
-          type: a.type,
-          name: a.file.name,
-          data: a.preview || '',
-          mimeType,
-        };
+    for (const a of attachments) {
+      // For images, only include if preview exists and has data
+      if (a.type === 'image') {
+        if (!a.preview || a.preview.length === 0) {
+          console.warn(
+            `[ChatInput] Skipping image ${a.file.name}: no preview data`
+          );
+          continue;
+        }
+      }
+
+      // Determine mimeType
+      let mimeType = a.file.type;
+      if (!mimeType && a.type === 'image') {
+        mimeType = 'image/png';
+      }
+
+      // Read file content as base64 for file attachments
+      let data = a.preview || '';
+      if (a.type === 'file' && !data) {
+        try {
+          data = await readFileAsBase64(a.file);
+          console.log(
+            `[ChatInput] Read file ${a.file.name}: ${data.length} chars`
+          );
+        } catch (error) {
+          console.error(
+            `[ChatInput] Failed to read file ${a.file.name}:`,
+            error
+          );
+        }
+      }
+
+      result.push({
+        id: a.id,
+        type: a.type,
+        name: a.file.name,
+        data,
+        mimeType,
       });
+    }
 
     // Debug logging
     console.log('[ChatInput] Converting attachments:', result.length);
@@ -258,11 +508,11 @@ export function ChatInput({
   const handleSubmit = async () => {
     if ((value.trim() || attachments.length > 0) && !isRunning && !disabled) {
       const text = value.trim();
-      const messageAttachments = convertToMessageAttachments();
+      const messageAttachments = await convertToMessageAttachments();
 
       setValue('');
       setAttachments([]);
-      await onSubmit(text, messageAttachments);
+      await onSubmit(text, messageAttachments, chatMode);
     }
   };
 
@@ -295,8 +545,8 @@ export function ChatInput({
     textarea.style.height = 'auto';
 
     // Calculate the new height
-    const maxHeight = isHome ? 200 : 120; // Max height in pixels
-    const minHeight = isHome ? 56 : 20; // Min height in pixels (home: taller default)
+    const maxHeight = isHome ? 200 : 140;
+    const minHeight = isHome ? 56 : 40;
     const newHeight = Math.min(
       Math.max(textarea.scrollHeight, minHeight),
       maxHeight
@@ -311,14 +561,25 @@ export function ChatInput({
 
   return (
     <div
+      ref={containerRef}
       className={cn(
-        'w-full',
+        'relative w-full transition-colors',
         isHome
           ? 'border-border/50 bg-background rounded-2xl border p-4 shadow-lg'
-          : 'border-border/60 bg-background rounded-xl border p-3 shadow-sm',
+          : 'border-border/60 bg-background rounded-2xl border p-3 shadow-sm',
+        isDragging && 'border-primary/50 bg-primary/5 border-2',
         className
       )}
     >
+      {/* Drag overlay */}
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[inherit]">
+          <div className="text-primary/70 flex items-center gap-2 text-sm font-medium">
+            <Paperclip className="size-4" />
+            <span>{t.home.dropFilesHere || 'Drop files here'}</span>
+          </div>
+        </div>
+      )}
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
@@ -378,8 +639,8 @@ export function ChatInput({
           isHome ? 'text-base' : 'px-1 text-sm'
         )}
         style={{
-          minHeight: isHome ? '56px' : '20px',
-          maxHeight: isHome ? '200px' : '120px',
+          minHeight: isHome ? '56px' : '40px',
+          maxHeight: isHome ? '200px' : '140px',
           overflowY: 'hidden',
         }}
         rows={1}
@@ -387,19 +648,14 @@ export function ChatInput({
       />
 
       {/* Bottom Actions */}
-      <div
-        className={cn(
-          'flex items-center justify-between',
-          isHome ? 'mt-3' : 'mt-2'
-        )}
-      >
-        {/* Add Button with Dropdown */}
-        <div className="flex items-center gap-1">
+      <div className="mt-2.5 flex items-center justify-between">
+        {/* Add Button + Category Tag */}
+        <div className="flex items-center gap-2">
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger
               disabled={isRunning || disabled}
               className={cn(
-                'flex items-center justify-center transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+                'flex shrink-0 items-center justify-center transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
                 isHome
                   ? 'border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground size-8 rounded-full border'
                   : 'text-muted-foreground hover:bg-accent hover:text-foreground size-7 rounded-md'
@@ -421,10 +677,38 @@ export function ChatInput({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+
+          <AgentModeSelector
+            value={chatMode}
+            onValueChange={selectChatMode}
+            disabled={isRunning || disabled}
+            compact={!isHome}
+          />
+
+          {/* Category Tag */}
+          {categoryTag && (
+            <span
+              className={cn(
+                'bg-primary/10 text-primary inline-flex items-center gap-1.5 rounded-full font-medium',
+                isHome ? 'h-8 px-3 text-xs' : 'h-7 px-2.5 text-xs'
+              )}
+            >
+              {categoryTag.icon}
+              {categoryTag.label}
+              <button
+                type="button"
+                onClick={categoryTag.onClose}
+                className="text-primary/60 hover:text-primary -mr-0.5 rounded-full transition-colors"
+              >
+                <X className="size-3.5" />
+              </button>
+            </span>
+          )}
         </div>
 
-        {/* Submit/Stop Button */}
-        <div className="flex items-center gap-1">
+        {/* Model selector + Submit/Stop Button */}
+        <div className="flex min-w-0 items-center gap-2">
+          <ModelSelector disabled={isRunning || disabled} compact={!isHome} />
           {isRunning ? (
             <button
               type="button"

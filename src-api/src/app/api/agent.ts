@@ -10,7 +10,13 @@ import {
   runExecutionPhase,
   runPlanningPhase,
 } from '@/shared/services/agent';
-import type { AgentRequest } from '@/shared/types/agent';
+import { generateTitle, runChat } from '@/shared/services/chat';
+import {
+  closeAcpRuntime,
+  promptAcpRuntime,
+  respondAcpPermission,
+} from '@/shared/services/acp';
+import type { AgentRequest, ModelConfig } from '@/shared/types/agent';
 
 const agent = new Hono();
 
@@ -45,6 +51,106 @@ const SSE_HEADERS = {
   'X-Accel-Buffering': 'no',
 };
 
+// Lightweight chat endpoint (bypasses Agent SDK for simple queries)
+agent.post('/chat', async (c) => {
+  const body = await c.req.json<AgentRequest>();
+
+  console.log('[AgentAPI] POST /chat received:', {
+    hasPrompt: !!body.prompt,
+    hasModelConfig: !!body.modelConfig,
+    hasConversation: !!(body.conversation && body.conversation.length > 0),
+  });
+
+  if (!body.prompt) {
+    return c.json({ error: 'prompt is required' }, 400);
+  }
+
+  const abortController = new AbortController();
+  const readable = createSSEStream(
+    runChat(body.prompt, body.modelConfig, body.language, body.conversation, abortController)
+  );
+
+  return new Response(readable, { headers: SSE_HEADERS });
+});
+
+// External agent runtime over ACP (stdio transport).
+agent.post('/acp', async (c) => {
+  const body = await c.req.json<{
+    prompt?: string;
+    taskId?: string;
+    workDir?: string;
+    runtime?: { id?: string; name?: string; command?: string; args?: string };
+    modelConfig?: ModelConfig;
+  }>();
+  const key = body.taskId?.trim();
+  const prompt = body.prompt?.trim();
+  const runtime = body.runtime;
+  if (!key || !prompt || !runtime?.id || !runtime.command) {
+    return c.json({ error: 'taskId, prompt and ACP runtime are required' }, 400);
+  }
+  const resolvedRuntime = {
+    id: runtime.id,
+    name: runtime.name || runtime.id,
+    command: runtime.command,
+    args: runtime.args,
+    model: body.modelConfig?.model,
+    modelProvider: body.modelConfig?.apiKey ? 'workany' : body.modelConfig?.providerId,
+    apiKey: body.modelConfig?.apiKey,
+    baseUrl: body.modelConfig?.baseUrl,
+    apiType: body.modelConfig?.apiType,
+  };
+
+  const abortController = new AbortController();
+  const encoder = new TextEncoder();
+  const readable = new ReadableStream({
+    start(controller) {
+      void promptAcpRuntime({
+        key,
+        prompt,
+        cwd: body.workDir || process.cwd(),
+        runtime: resolvedRuntime,
+        signal: abortController.signal,
+        emit: (message) => {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(message)}\n\n`)
+          );
+        },
+      })
+        .catch((error) => {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: 'error',
+                message: error instanceof Error ? error.message : String(error),
+              })}\n\n`
+            )
+          );
+        })
+        .finally(() => controller.close());
+    },
+    cancel() {
+      abortController.abort();
+    },
+  });
+
+  return new Response(readable, { headers: SSE_HEADERS });
+});
+
+agent.post('/permission', async (c) => {
+  const body = await c.req.json<{
+    sessionId?: string;
+    permissionId?: string;
+    approved?: boolean;
+  }>();
+  const ok =
+    !!body.sessionId &&
+    !!body.permissionId &&
+    respondAcpPermission(body.sessionId, body.permissionId, !!body.approved);
+  return ok
+    ? c.json({ ok: true })
+    : c.json({ error: 'Permission request is no longer active' }, 404);
+});
+
 // Phase 1: Create a plan (no execution)
 agent.post('/plan', async (c) => {
   const body = await c.req.json<AgentRequest>();
@@ -67,7 +173,7 @@ agent.post('/plan', async (c) => {
 
   const session = createSession('plan');
   const readable = createSSEStream(
-    runPlanningPhase(body.prompt, session, body.modelConfig)
+    runPlanningPhase(body.prompt, session, body.modelConfig, body.language)
   );
 
   return new Response(readable, { headers: SSE_HEADERS });
@@ -94,6 +200,7 @@ agent.post('/execute', async (c) => {
       appDirEnabled: boolean;
       mcpConfigPath?: string;
     };
+    language?: string;
   }>();
 
   console.log('[AgentAPI] POST /execute received:', {
@@ -129,7 +236,8 @@ agent.post('/execute', async (c) => {
       body.modelConfig,
       body.sandboxConfig,
       body.skillsConfig,
-      body.mcpConfig
+      body.mcpConfig,
+      body.language
     )
   );
 
@@ -189,11 +297,36 @@ agent.post('/', async (c) => {
       body.sandboxConfig,
       body.images,
       body.skillsConfig,
-      body.mcpConfig
+      body.mcpConfig,
+      body.language
     )
   );
 
   return new Response(readable, { headers: SSE_HEADERS });
+});
+
+// Generate a short title from a prompt
+agent.post('/title', async (c) => {
+  const body = await c.req.json<{
+    prompt: string;
+    modelConfig?: { apiKey?: string; baseUrl?: string; model?: string };
+    language?: string;
+  }>();
+
+  console.log('[AgentAPI] POST /title received:', {
+    promptLength: body.prompt?.length,
+    promptPreview: body.prompt?.slice(0, 80),
+    hasModelConfig: !!body.modelConfig,
+    language: body.language,
+  });
+
+  if (!body.prompt) {
+    return c.json({ error: 'prompt is required' }, 400);
+  }
+
+  const title = await generateTitle(body.prompt, body.modelConfig, body.language);
+  console.log('[AgentAPI] POST /title result:', { title });
+  return c.json({ title });
 });
 
 // Stop a running agent
@@ -202,7 +335,8 @@ agent.post('/stop/:sessionId', async (c) => {
   const session = getSession(sessionId);
 
   if (!session) {
-    return c.json({ error: 'Session not found' }, 404);
+    closeAcpRuntime(sessionId);
+    return c.json({ status: 'stopped' });
   }
 
   deleteSession(sessionId);

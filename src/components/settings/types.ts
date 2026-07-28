@@ -11,6 +11,7 @@ export type SettingsCategory =
   | 'general'
   | 'workplace'
   | 'model'
+  | 'agent'
   | 'mcp'
   | 'skills'
   | 'connector'

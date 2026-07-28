@@ -4,6 +4,8 @@ export default {
   context: 'Context',
   showSteps: 'Show {count} steps',
   hideSteps: 'Hide steps',
+  workingSteps: 'Working · {count} steps',
+  workedSteps: 'Worked · {count} steps',
   running: 'Running',
   completed: 'Completed',
   error: 'Error',

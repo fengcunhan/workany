@@ -29,6 +29,10 @@ export default {
   // 任务操作
   favorite: '收藏',
   unfavorite: '取消收藏',
+  rename: '重命名',
+  renameTask: '重命名任务',
+  renameTaskDescription: '为这个任务设置一个新标题',
+  taskTitle: '标题',
   deleteTask: '删除任务',
   deleteTaskConfirm: '确定要删除这个任务吗？',
   deleteTaskDescription: '此操作无法撤销，任务中的所有消息将被永久删除。',
@@ -50,6 +54,8 @@ export default {
       '尚未配置 AI 模型。请先配置自定义模型（API 地址、密钥、模型名称）后再开始对话。',
     claudeCodeNotFound:
       'Claude Code 未安装或不可用。请在设置中配置自定义 AI 模型，或安装 Claude Code（npm install -g @anthropic-ai/claude-code）',
+    kimiCliNotFound:
+      'Kimi CLI 未安装或不可用。请在设置中配置自定义 AI 模型，或安装 Kimi CLI（curl -L code.kimi.com/install.sh | bash）',
     configureModel: '配置模型',
     apiKeyError: 'AI 模型接口请求失败，请检查模型配置是否正确（API 地址、密钥、模型名称等）',
     configureApiKey: '前往配置',

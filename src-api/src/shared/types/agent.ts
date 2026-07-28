@@ -25,9 +25,11 @@ export type {
  * Model configuration for custom API endpoints
  */
 export interface ModelConfig {
-  apiKey?: string; // API key (ANTHROPIC_API_KEY)
-  baseUrl?: string; // Custom API base URL (ANTHROPIC_BASE_URL)
+  apiKey?: string; // API key
+  baseUrl?: string; // Custom API base URL
   model?: string; // Model name to use
+  providerId?: string; // Provider identifier used to disambiguate ACP model IDs
+  apiType?: 'anthropic-messages' | 'openai-completions' | 'other'; // API format type
 }
 
 /**
@@ -79,6 +81,8 @@ export interface AgentRequest {
     role: 'user' | 'assistant';
     content: string;
   }>;
+  /** Preferred response language (e.g., en-US, zh-CN) */
+  language?: string;
   // Two-phase execution control
   phase?: 'plan' | 'execute';
   planId?: string; // Reference to approved plan
@@ -90,7 +94,7 @@ export interface AgentRequest {
   // MCP configuration
   mcpConfig?: McpConfigRequest;
   // Provider selection (optional, defaults to env config)
-  provider?: 'claude' | 'deepagents';
+  provider?: 'codeany';
   // Custom model configuration
   modelConfig?: ModelConfig;
   // Sandbox configuration for isolated execution

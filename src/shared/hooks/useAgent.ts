@@ -30,6 +30,23 @@ import { getAppDataDir, getFileName } from '@/shared/lib/paths';
 
 const AGENT_SERVER_URL = API_BASE_URL;
 
+export type AgentRunMode = 'chat' | `agent:${string}`;
+
+function getAcpRuntime(mode?: AgentRunMode) {
+  if (!mode?.startsWith('agent:')) return undefined;
+  const id = mode.slice(6);
+  const runtime = getSettings().agentRuntimes.find(
+    (item) => item.id === id && item.enabled && item.type === 'acp'
+  );
+  if (!runtime) return undefined;
+  return {
+    id: runtime.id,
+    name: runtime.name,
+    command: String(runtime.config.command || ''),
+    args: String(runtime.config.args || ''),
+  };
+}
+
 // Helper to get current language translations
 function getErrorMessages() {
   const settings = getSettings();
@@ -37,6 +54,11 @@ function getErrorMessages() {
   return (
     translations[lang]?.common?.errors || translations['zh-CN'].common.errors
   );
+}
+
+function getPreferredLanguage(): string | undefined {
+  const lang = getSettings().language;
+  return lang && lang.trim() !== '' ? lang : undefined;
 }
 
 console.log(
@@ -123,36 +145,21 @@ async function fetchWithRetry(
   throw lastError || new Error('Fetch failed after retries');
 }
 
-// Helper to get model configuration from settings
+// Helper to get model configuration from user settings
 function getModelConfig():
-  | { apiKey?: string; baseUrl?: string; model?: string }
+  | {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+      apiType?: string;
+      providerId?: string;
+    }
   | undefined {
   try {
     const settings = getSettings();
 
-    console.log('[useAgent] getModelConfig called:', {
-      defaultProvider: settings.defaultProvider,
-      defaultModel: settings.defaultModel,
-      providersCount: settings.providers.length,
-    });
-
-    // Check if settings appear to be default (not loaded from storage)
-    // This helps diagnose issues where user settings are not being loaded
-    if (
-      settings.defaultProvider === 'default' &&
-      settings.providers.length === 2 &&
-      settings.providers.every((p) => !p.apiKey)
-    ) {
-      console.warn(
-        '[useAgent] WARNING: Settings appear to be defaults. ' +
-          'If you configured a custom API provider, it may not have been loaded correctly. ' +
-          'Check browser console for [Settings] logs to diagnose the issue.'
-      );
-    }
-
-    // If using "default" provider, return undefined to use environment variables
-    if (settings.defaultProvider === 'default') {
-      console.log('[useAgent] Using default provider (environment variables)');
+    // No provider configured — user needs to set one up
+    if (!settings.defaultProvider || settings.defaultProvider === 'default') {
       return undefined;
     }
 
@@ -160,22 +167,17 @@ function getModelConfig():
       (p) => p.id === settings.defaultProvider
     );
 
-    console.log(
-      '[useAgent] Found provider:',
-      provider
-        ? {
-            id: provider.id,
-            name: provider.name,
-            hasApiKey: !!provider.apiKey,
-            hasBaseUrl: !!provider.baseUrl,
-          }
-        : 'NOT FOUND'
-    );
-
     if (!provider) return undefined;
 
-    // Only return config if we have custom settings
-    const config: { apiKey?: string; baseUrl?: string; model?: string } = {};
+    const config: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+      apiType?: string;
+      providerId?: string;
+    } = {};
+
+    config.providerId = provider.id;
 
     if (provider.apiKey) {
       config.apiKey = provider.apiKey;
@@ -186,18 +188,14 @@ function getModelConfig():
     if (settings.defaultModel) {
       config.model = settings.defaultModel;
     }
-
-    // Return undefined if no custom config
-    if (!config.apiKey && !config.baseUrl && !config.model) {
-      console.log('[useAgent] No custom config found, returning undefined');
-      return undefined;
+    if (provider.apiType) {
+      config.apiType = provider.apiType;
     }
 
-    console.log('[useAgent] Returning modelConfig:', {
-      hasApiKey: !!config.apiKey,
-      baseUrl: config.baseUrl,
-      model: config.model,
-    });
+    // Return undefined if no API key configured
+    if (!config.apiKey) {
+      return undefined;
+    }
 
     return config;
   } catch (error) {
@@ -361,6 +359,7 @@ export interface AgentMessage {
     | 'plan'
     | 'direct_answer';
   content?: string;
+  isDelta?: boolean;
   name?: string;
   id?: string; // tool_use id
   input?: unknown;
@@ -431,13 +430,15 @@ export interface UseAgentReturn {
     prompt: string,
     existingTaskId?: string,
     sessionInfo?: SessionInfo,
-    attachments?: MessageAttachment[]
+    attachments?: MessageAttachment[],
+    mode?: AgentRunMode
   ) => Promise<string>;
   approvePlan: () => Promise<void>;
   rejectPlan: () => void;
   continueConversation: (
     reply: string,
-    attachments?: MessageAttachment[]
+    attachments?: MessageAttachment[],
+    mode?: AgentRunMode
   ) => Promise<void>;
   stopAgent: () => Promise<void>;
   clearMessages: () => void;
@@ -452,6 +453,8 @@ export interface UseAgentReturn {
     answers: Record<string, string>
   ) => Promise<void>;
   setSessionInfo: (sessionId: string, taskIndex: number) => void;
+  // Generated title from LLM summarization (null until ready)
+  generatedTitle: string | null;
   // Background tasks
   backgroundTasks: BackgroundTask[];
   runningBackgroundTaskCount: number;
@@ -840,6 +843,8 @@ export function useAgent(): UseAgentReturn {
   const [currentTaskIndex, setCurrentTaskIndex] = useState<number>(1);
   // Track file changes to trigger refresh in UI
   const [filesVersion, setFilesVersion] = useState<number>(0);
+  // Generated title from LLM summarization
+  const [generatedTitle, setGeneratedTitle] = useState<string | null>(null);
   const [sessionFolder, setSessionFolder] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null); // Backend session ID for API calls
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1076,7 +1081,9 @@ export function useAgent(): UseAgentReturn {
                   type: msg.type as AgentMessage['type'],
                   content: msg.content || undefined,
                   name: msg.tool_name || undefined,
-                  input: msg.tool_input ? JSON.parse(msg.tool_input) : undefined,
+                  input: msg.tool_input
+                    ? JSON.parse(msg.tool_input)
+                    : undefined,
                   output: msg.tool_output || undefined,
                   toolUseId: msg.tool_use_id || undefined,
                   subtype: msg.subtype as AgentMessage['subtype'],
@@ -1213,10 +1220,15 @@ export function useAgent(): UseAgentReturn {
             attachments,
           });
         } else if (msg.type === 'text') {
-          agentMessages.push({
-            type: 'text' as const,
-            content: msg.content || undefined,
-          });
+          const previous = agentMessages.at(-1);
+          if (previous?.type === 'text') {
+            previous.content = `${previous.content || ''}${msg.content || ''}`;
+          } else {
+            agentMessages.push({
+              type: 'text' as const,
+              content: msg.content || undefined,
+            });
+          }
         } else if (msg.type === 'tool_use') {
           agentMessages.push({
             type: 'tool_use' as const,
@@ -1293,7 +1305,11 @@ export function useAgent(): UseAgentReturn {
         const lastPlanMessage = [...agentMessages]
           .reverse()
           .find((m) => m.type === 'plan' && m.plan);
-        if (lastPlanMessage && lastPlanMessage.type === 'plan' && lastPlanMessage.plan) {
+        if (
+          lastPlanMessage &&
+          lastPlanMessage.type === 'plan' &&
+          lastPlanMessage.plan
+        ) {
           const planSteps = lastPlanMessage.plan.steps || [];
           // Check if plan has incomplete steps (pending or no status)
           const hasIncompleteSteps = planSteps.some(
@@ -1302,9 +1318,16 @@ export function useAgent(): UseAgentReturn {
 
           // Restore plan if task is not completed/stopped and has incomplete steps
           if (hasIncompleteSteps && !taskIsCompleted && !taskIsStopped) {
-            console.log('[useAgent] Restoring plan awaiting approval for task:', id, {
-              planSteps: planSteps.map((s) => ({ title: s.title, status: s.status })),
-            });
+            console.log(
+              '[useAgent] Restoring plan awaiting approval for task:',
+              id,
+              {
+                planSteps: planSteps.map((s) => ({
+                  title: s.title,
+                  status: s.status,
+                })),
+              }
+            );
             setPlan(lastPlanMessage.plan);
             setPhase('awaiting_approval');
           }
@@ -1392,6 +1415,22 @@ export function useAgent(): UseAgentReturn {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let pendingDeltaText = '';
+
+      const flushDeltaText = async () => {
+        if (!pendingDeltaText) return;
+        const content = pendingDeltaText;
+        pendingDeltaText = '';
+        try {
+          await createMessage({
+            task_id: currentTaskId,
+            type: 'text',
+            content,
+          });
+        } catch (dbError) {
+          console.error('Failed to save streamed text message:', dbError);
+        }
+      };
 
       // Track pending tool_use messages to match with tool_result
       const pendingToolUses: Map<
@@ -1431,6 +1470,7 @@ export function useAgent(): UseAgentReturn {
                   sessionIdRef.current = data.sessionId || null;
                 }
               } else if (data.type === 'done') {
+                await flushDeltaText();
                 // Update background task status (always, even if not active)
                 updateBackgroundTaskStatus(currentTaskId, false);
 
@@ -1450,15 +1490,37 @@ export function useAgent(): UseAgentReturn {
                   });
                 }
               } else if (data.type === 'permission_request') {
+                await flushDeltaText();
                 // Handle permission request - only for active task
                 if (isActive && data.permission) {
                   setPendingPermission(data.permission);
                   setMessages((prev) => [...prev, data]);
                 }
               } else {
+                if (data.type === 'text' && data.isDelta && data.content) {
+                  pendingDeltaText += data.content;
+                } else {
+                  await flushDeltaText();
+                }
+
                 // UI update only for active task
                 if (isActive) {
-                  setMessages((prev) => [...prev, data]);
+                  setMessages((prev) => {
+                    if (data.type !== 'text' || !data.isDelta) {
+                      return [...prev, data];
+                    }
+                    const last = prev.at(-1);
+                    if (last?.type === 'text' && last.isDelta) {
+                      return [
+                        ...prev.slice(0, -1),
+                        {
+                          ...last,
+                          content: `${last.content || ''}${data.content || ''}`,
+                        },
+                      ];
+                    }
+                    return [...prev, data];
+                  });
                 }
 
                 // Extract file paths from text messages
@@ -1576,6 +1638,7 @@ export function useAgent(): UseAgentReturn {
 
                 // Save message to database
                 try {
+                  if (data.type === 'text' && data.isDelta) continue;
                   await createMessage({
                     task_id: currentTaskId,
                     type: data.type as
@@ -1614,6 +1677,7 @@ export function useAgent(): UseAgentReturn {
           }
         }
       }
+      await flushDeltaText();
     },
     []
   );
@@ -1624,7 +1688,8 @@ export function useAgent(): UseAgentReturn {
       prompt: string,
       existingTaskId?: string,
       sessionInfo?: SessionInfo,
-      attachments?: MessageAttachment[]
+      attachments?: MessageAttachment[],
+      mode?: 'auto' | 'chat' | 'task'
     ): Promise<string> => {
       // If there's already a running task, move it to background
       if (isRunning && abortControllerRef.current && taskId) {
@@ -1692,6 +1757,51 @@ export function useAgent(): UseAgentReturn {
             'in session:',
             sessId
           );
+
+          // Generate a short title asynchronously
+          (async () => {
+            try {
+              const modelConfig = getModelConfig();
+              const language = getPreferredLanguage();
+              console.log(
+                '[useAgent] Requesting title generation for prompt:',
+                prompt.slice(0, 80)
+              );
+              console.log(
+                '[useAgent] Title request URL:',
+                `${AGENT_SERVER_URL}/agent/title`
+              );
+              console.log('[useAgent] Title request payload:', {
+                prompt: prompt.slice(0, 80),
+                hasModelConfig: !!modelConfig,
+                language,
+              });
+              const res = await fetch(`${AGENT_SERVER_URL}/agent/title`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt, modelConfig, language }),
+              });
+              console.log('[useAgent] Title response status:', res.status);
+              if (res.ok) {
+                const data = await res.json();
+                console.log('[useAgent] Title response data:', data);
+                if (data.title) {
+                  await updateTask(currentTaskId, { prompt: data.title });
+                  setGeneratedTitle(data.title);
+                  console.log('[useAgent] Updated task title:', data.title);
+                }
+              } else {
+                const errorText = await res.text();
+                console.error(
+                  '[useAgent] Title generation failed:',
+                  res.status,
+                  errorText
+                );
+              }
+            } catch (err) {
+              console.error('[useAgent] Failed to generate title:', err);
+            }
+          })();
         } else {
           console.log('[useAgent] Task already exists:', currentTaskId);
         }
@@ -1712,15 +1822,83 @@ export function useAgent(): UseAgentReturn {
 
       const hasImages = images && images.length > 0;
 
-      // Debug logging for image attachments
+      // Save file attachments to disk and augment prompt with file paths
+      const fileAttachments =
+        attachments?.filter((a) => a.type === 'file') || [];
+      let augmentedPrompt = prompt;
+      let savedFileRefs: AttachmentReference[] = [];
+
+      if (fileAttachments.length > 0) {
+        // Ensure we have a folder to save attachments to
+        let saveFolder = computedSessionFolder;
+        if (!saveFolder) {
+          try {
+            const appDir = await getAppDataDir();
+            saveFolder = `${appDir}/sessions/temp-${Date.now()}`;
+          } catch {
+            // ignore
+          }
+        }
+
+        if (saveFolder) {
+          try {
+            savedFileRefs = await saveAttachments(saveFolder, fileAttachments);
+            console.log(
+              '[useAgent] Saved file attachments:',
+              savedFileRefs.map((r) => r.path)
+            );
+            setFilesVersion((v) => v + 1);
+
+            // Append file paths to prompt so the agent knows about them
+            const filePaths = savedFileRefs.map((r) => r.path).join('\n');
+            augmentedPrompt = `${prompt}\n\n[Attached files]\n${filePaths}`;
+          } catch (error) {
+            console.error('[useAgent] Failed to save file attachments:', error);
+          }
+        } else {
+          // Can't save to disk — include file content inline for small text files
+          console.warn(
+            '[useAgent] No folder available, embedding file content in prompt'
+          );
+          const fileInfo = fileAttachments
+            .map((a) => {
+              // For text-based files, decode and include content
+              if (
+                a.data &&
+                (a.mimeType?.startsWith('text/') ||
+                  a.name.match(/\.(csv|txt|json|xml|tsv|md|log)$/i))
+              ) {
+                try {
+                  const content = atob(
+                    a.data.includes(',') ? a.data.split(',')[1] : a.data
+                  );
+                  return `[File: ${a.name}]\n${content}`;
+                } catch {
+                  return `[File: ${a.name}] (unable to decode)`;
+                }
+              }
+              return `[File: ${a.name}] (binary file, unable to include inline)`;
+            })
+            .join('\n\n');
+          augmentedPrompt = `${prompt}\n\n${fileInfo}`;
+        }
+      }
+
+      // Debug logging for attachments
       if (attachments && attachments.length > 0) {
         console.log('[useAgent] Attachments received:', attachments.length);
         attachments.forEach((a, i) => {
           console.log(
-            `[useAgent] Attachment ${i}: type=${a.type}, hasData=${!!a.data}, dataLength=${a.data?.length || 0}`
+            `[useAgent] Attachment ${i}: type=${a.type}, name=${a.name}, hasData=${!!a.data}, dataLength=${a.data?.length || 0}`
           );
         });
         console.log('[useAgent] Valid images for API:', images?.length || 0);
+        console.log('[useAgent] File attachments:', fileAttachments.length);
+        console.log('[useAgent] computedSessionFolder:', computedSessionFolder);
+        console.log(
+          '[useAgent] augmentedPrompt:',
+          augmentedPrompt.slice(0, 200)
+        );
       }
 
       try {
@@ -1730,6 +1908,146 @@ export function useAgent(): UseAgentReturn {
         // The backend will check if Claude Code is available locally.
         // If Claude Code is available, it will use it even without explicit model configuration.
         // If Claude Code is not available and no model is configured, the backend will return an error.
+
+        // Chat mode is always a direct model request: no agent runtime or tools.
+        const shouldUseFastChat = mode === 'chat';
+
+        if (shouldUseFastChat) {
+          console.log(
+            '[useAgent] Using fast chat for simple query, mode:',
+            mode
+          );
+          setPhase('executing');
+
+          const language = getPreferredLanguage();
+
+          const response = await fetchWithRetry(
+            `${AGENT_SERVER_URL}/agent/chat`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: augmentedPrompt,
+                modelConfig,
+                language,
+              }),
+              signal: abortController.signal,
+            }
+          );
+
+          if (!response.ok) {
+            throw new Error(`Server error: ${response.status}`);
+          }
+
+          // Process fast chat SSE stream
+          const reader = response.body?.getReader();
+          if (!reader) throw new Error('No response body');
+
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let fullContent = '';
+          const isActiveTask = () => activeTaskIdRef.current === currentTaskId;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6)) as AgentMessage;
+
+                  if (data.type === 'text' && data.content) {
+                    fullContent += data.content;
+                    if (isActiveTask()) {
+                      setMessages((prev) => {
+                        // Append to existing text message or create new one
+                        const last = prev[prev.length - 1];
+                        if (last && last.type === 'text') {
+                          return [
+                            ...prev.slice(0, -1),
+                            {
+                              ...last,
+                              content: (last.content || '') + data.content,
+                            },
+                          ];
+                        }
+                        return [
+                          ...prev,
+                          { type: 'text', content: data.content },
+                        ];
+                      });
+                    }
+                  } else if (data.type === 'done') {
+                    if (isActiveTask()) {
+                      setPhase('idle');
+                    }
+                  } else if (data.type === 'error') {
+                    if (isActiveTask()) {
+                      setMessages((prev) => [...prev, data]);
+                      setPhase('idle');
+                    }
+                  }
+                } catch {
+                  // Ignore parse errors
+                }
+              }
+            }
+          }
+
+          // Save to database
+          try {
+            // Save user message with attachment refs
+            const allRefs = [...savedFileRefs];
+            await createMessage({
+              task_id: currentTaskId,
+              type: 'user',
+              content: prompt,
+              attachments:
+                allRefs.length > 0 ? JSON.stringify(allRefs) : undefined,
+            });
+            if (fullContent) {
+              await createMessage({
+                task_id: currentTaskId,
+                type: 'text',
+                content: fullContent,
+              });
+            }
+            await updateTask(currentTaskId, { status: 'completed' });
+          } catch (dbError) {
+            console.error('Failed to save fast chat response:', dbError);
+          }
+
+          return currentTaskId;
+        }
+
+        const acpRuntime = getAcpRuntime(mode);
+        if (acpRuntime) {
+          setPhase('executing');
+          const workDir = computedSessionFolder || (await getAppDataDir());
+          const response = await fetchWithRetry(
+            `${AGENT_SERVER_URL}/agent/acp`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: augmentedPrompt,
+                taskId: currentTaskId,
+                workDir,
+                runtime: acpRuntime,
+                modelConfig,
+              }),
+              signal: abortController.signal,
+            }
+          );
+          if (!response.ok) throw new Error(`Server error: ${response.status}`);
+          await processStream(response, currentTaskId, abortController);
+          return currentTaskId;
+        }
 
         // If images are attached, use direct execution (skip planning)
         // because images need to be processed during execution, not planning
@@ -1745,32 +2063,29 @@ export function useAgent(): UseAgentReturn {
           };
           setMessages([userMessage]);
 
-          // Save user message to database (save attachments to files first)
+          // Save user message to database (save image attachments to files;
+          // file attachments were already saved earlier)
           try {
-            let attachmentRefs: string | undefined;
-            if (
-              attachments &&
-              attachments.length > 0 &&
-              computedSessionFolder
-            ) {
-              // Save attachments to file system and get references
-              const refs = await saveAttachments(
+            const allRefs: AttachmentReference[] = [...savedFileRefs];
+            const imageAttachments =
+              attachments?.filter((a) => a.type === 'image') || [];
+            if (imageAttachments.length > 0 && computedSessionFolder) {
+              const imageRefs = await saveAttachments(
                 computedSessionFolder,
-                attachments
+                imageAttachments
               );
-              attachmentRefs = JSON.stringify(refs);
+              allRefs.push(...imageRefs);
               console.log(
-                '[useAgent] Saved attachments to files:',
-                refs.length
+                '[useAgent] Saved image attachments to files:',
+                imageRefs.length
               );
-              // Trigger working files refresh
-              setFilesVersion((v) => v + 1);
             }
             await createMessage({
               task_id: currentTaskId,
               type: 'user',
               content: prompt,
-              attachments: attachmentRefs,
+              attachments:
+                allRefs.length > 0 ? JSON.stringify(allRefs) : undefined,
             });
           } catch (error) {
             console.error('Failed to save user message:', error);
@@ -1780,6 +2095,7 @@ export function useAgent(): UseAgentReturn {
           const workDir = computedSessionFolder || (await getAppDataDir());
           const sandboxConfig = getSandboxConfig();
           const skillsConfig = getSkillsConfig();
+          const language = getPreferredLanguage();
 
           const mcpConfig = getMcpConfig();
 
@@ -1790,7 +2106,7 @@ export function useAgent(): UseAgentReturn {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              prompt,
+              prompt: augmentedPrompt,
               workDir,
               taskId: currentTaskId,
               modelConfig,
@@ -1798,6 +2114,7 @@ export function useAgent(): UseAgentReturn {
               images,
               skillsConfig,
               mcpConfig,
+              language,
             }),
             signal: abortController.signal,
           });
@@ -1810,6 +2127,20 @@ export function useAgent(): UseAgentReturn {
           return currentTaskId;
         }
 
+        // Save user message to database (for plan path)
+        try {
+          const allRefs = [...savedFileRefs];
+          await createMessage({
+            task_id: currentTaskId,
+            type: 'user',
+            content: prompt,
+            attachments:
+              allRefs.length > 0 ? JSON.stringify(allRefs) : undefined,
+          });
+        } catch (error) {
+          console.error('Failed to save user message:', error);
+        }
+
         // Phase 1: Request planning (no images)
         const response = await fetchWithRetry(
           `${AGENT_SERVER_URL}/agent/plan`,
@@ -1819,8 +2150,9 @@ export function useAgent(): UseAgentReturn {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              prompt,
+              prompt: augmentedPrompt,
               modelConfig,
+              language: getPreferredLanguage(),
             }),
             signal: abortController.signal,
           }
@@ -2032,6 +2364,7 @@ export function useAgent(): UseAgentReturn {
       const sandboxConfig = getSandboxConfig();
       const skillsConfig = getSkillsConfig();
       const mcpConfig = getMcpConfig();
+      const language = getPreferredLanguage();
 
       const response = await fetchWithRetry(
         `${AGENT_SERVER_URL}/agent/execute`,
@@ -2049,6 +2382,7 @@ export function useAgent(): UseAgentReturn {
             sandboxConfig,
             skillsConfig,
             mcpConfig,
+            language,
           }),
           signal: abortController.signal,
         }
@@ -2198,7 +2532,11 @@ export function useAgent(): UseAgentReturn {
 
   // Continue conversation with context
   const continueConversation = useCallback(
-    async (reply: string, attachments?: MessageAttachment[]): Promise<void> => {
+    async (
+      reply: string,
+      attachments?: MessageAttachment[],
+      mode?: 'auto' | 'chat' | 'task'
+    ): Promise<void> => {
       if (isRunning || !taskId) return;
 
       // Add user message to UI immediately (with attachments if any)
@@ -2266,6 +2604,8 @@ export function useAgent(): UseAgentReturn {
             mimeType: a.mimeType || 'image/png',
           }));
 
+        const hasImages = images && images.length > 0;
+
         // Debug logging for image attachments
         if (attachments && attachments.length > 0) {
           console.log(
@@ -2280,25 +2620,140 @@ export function useAgent(): UseAgentReturn {
           console.log('[useAgent] Valid images for API:', images?.length || 0);
         }
 
-        // Send conversation with full history
-        const response = await fetchWithRetry(`${AGENT_SERVER_URL}/agent`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            prompt: reply,
-            conversation: conversationHistory,
-            workDir,
-            taskId,
-            modelConfig,
-            sandboxConfig,
-            images: images && images.length > 0 ? images : undefined,
-            skillsConfig,
-            mcpConfig,
-          }),
-          signal: abortController.signal,
-        });
+        // Chat mode remains a direct model request for follow-up messages.
+        const shouldUseFastChat = mode === 'chat';
+
+        if (shouldUseFastChat) {
+          console.log(
+            '[useAgent] continueConversation: Using fast chat, mode:',
+            mode
+          );
+          setPhase('executing');
+
+          const language = getPreferredLanguage();
+
+          const response = await fetchWithRetry(
+            `${AGENT_SERVER_URL}/agent/chat`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: reply,
+                modelConfig,
+                language,
+                conversation: conversationHistory,
+              }),
+              signal: abortController.signal,
+            }
+          );
+
+          if (!response.ok) {
+            throw new Error(`Server error: ${response.status}`);
+          }
+
+          // Process fast chat SSE stream
+          const reader = response.body?.getReader();
+          if (!reader) throw new Error('No response body');
+
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let fullContent = '';
+          const isActiveTask = () => activeTaskIdRef.current === taskId;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6)) as AgentMessage;
+
+                  if (data.type === 'text' && data.content) {
+                    fullContent += data.content;
+                    if (isActiveTask()) {
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (
+                          last &&
+                          last.type === 'text' &&
+                          last !== userMessage
+                        ) {
+                          return [
+                            ...prev.slice(0, -1),
+                            {
+                              ...last,
+                              content: (last.content || '') + data.content,
+                            },
+                          ];
+                        }
+                        return [
+                          ...prev,
+                          { type: 'text', content: data.content },
+                        ];
+                      });
+                    }
+                  } else if (data.type === 'done') {
+                    if (isActiveTask()) {
+                      setPhase('idle');
+                    }
+                  } else if (data.type === 'error') {
+                    if (isActiveTask()) {
+                      setMessages((prev) => [...prev, data]);
+                      setPhase('idle');
+                    }
+                  }
+                } catch {
+                  // Ignore parse errors
+                }
+              }
+            }
+          }
+
+          // Save to database
+          try {
+            if (fullContent) {
+              await createMessage({
+                task_id: taskId,
+                type: 'text',
+                content: fullContent,
+              });
+            }
+          } catch (dbError) {
+            console.error('Failed to save fast chat response:', dbError);
+          }
+
+          return;
+        }
+
+        // Send conversation through the selected agent runtime.
+        const acpRuntime = getAcpRuntime(mode);
+        const response = await fetchWithRetry(
+          `${AGENT_SERVER_URL}${acpRuntime ? '/agent/acp' : '/agent'}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              prompt: reply,
+              conversation: conversationHistory,
+              workDir,
+              taskId,
+              modelConfig,
+              sandboxConfig,
+              images: hasImages ? images : undefined,
+              skillsConfig,
+              mcpConfig,
+              runtime: acpRuntime,
+            }),
+            signal: abortController.signal,
+          }
+        );
 
         if (!response.ok) {
           throw new Error(`Server error: ${response.status}`);
@@ -2556,6 +3011,7 @@ export function useAgent(): UseAgentReturn {
     respondToPermission,
     respondToQuestion,
     setSessionInfo,
+    generatedTitle,
     // Background tasks
     backgroundTasks,
     runningBackgroundTaskCount,

@@ -53,10 +53,6 @@ function formatProviderMetadata(
   }));
 }
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown error';
-}
-
 // ============================================================================
 // Routes
 // ============================================================================
@@ -256,7 +252,10 @@ providersRoutes.post('/settings/sync', async (c) => {
   const configLoader = getConfigLoader();
 
   if (body.sandboxProvider) {
-    await manager.switchSandboxProvider(body.sandboxProvider, body.sandboxConfig);
+    await manager.switchSandboxProvider(
+      body.sandboxProvider,
+      body.sandboxConfig
+    );
   }
 
   if (body.agentProvider) {
@@ -299,6 +298,7 @@ interface DetectBody {
   baseUrl: string;
   apiKey: string;
   model?: string;
+  apiType?: 'anthropic-messages' | 'openai-completions' | 'other';
 }
 
 interface DetectSuccessResponse {
@@ -317,26 +317,74 @@ interface DetectErrorResponse {
 // type DetectResponse = DetectSuccessResponse | DetectErrorResponse;
 
 /**
- * Build API URL from base URL
- * Handles various base URL formats and ensures proper /v1/messages path
+ * Build the exact endpoint used by the selected upstream API format.
  */
-function buildApiUrl(baseUrl: string): string {
-  const normalized = baseUrl.replace(/\/$/, '');
+function buildApiUrl(
+  baseUrl: string,
+  apiType: NonNullable<DetectBody['apiType']>,
+  model: string
+): string {
+  const normalized = baseUrl.replace(/\/+$/, '');
 
-  if (normalized.includes('/messages')) {
-    return normalized;
+  if (apiType === 'other') {
+    return `${normalized}/${model.replace(/^\/+/, '')}`;
   }
 
-  if (normalized.endsWith('/v1')) {
-    return `${normalized}/messages`;
+  if (apiType === 'anthropic-messages') {
+    if (normalized.endsWith('/messages')) return normalized;
+    return `${normalized}/v1/messages`;
   }
 
-  return `${normalized}/v1/messages`;
+  if (normalized.endsWith('/chat/completions')) return normalized;
+  return `${normalized}/chat/completions`;
+}
+
+function modelMatches(requested: string, returned: string): boolean {
+  const requestedModel = requested.toLowerCase();
+  const returnedModel = returned.toLowerCase();
+  return (
+    requestedModel === returnedModel ||
+    returnedModel.startsWith(requestedModel) ||
+    requestedModel.startsWith(returnedModel) ||
+    returnedModel.includes(requestedModel)
+  );
+}
+
+function validateTestResponse(
+  data: unknown,
+  apiType: NonNullable<DetectBody['apiType']>,
+  requestedModel: string
+): string | null {
+  if (!data || typeof data !== 'object') return 'Empty response';
+  const payload = data as Record<string, unknown>;
+
+  if (apiType === 'other') {
+    const images = Array.isArray(payload.images)
+      ? payload.images
+      : Array.isArray(payload.data)
+        ? payload.data
+        : [];
+    return images.length > 0 ? null : 'Upstream returned no images';
+  }
+
+  const hasContent =
+    (Array.isArray(payload.choices) && payload.choices.length > 0) ||
+    (Array.isArray(payload.content) && payload.content.length > 0);
+  if (!hasContent) return 'Upstream returned no response content';
+
+  if (
+    typeof payload.model === 'string' &&
+    !modelMatches(requestedModel, payload.model)
+  ) {
+    return `Model mismatch: requested "${requestedModel}" but got "${payload.model}"`;
+  }
+
+  return null;
 }
 
 /**
  * POST /providers/detect
- * Detect if an OpenAI-compatible API configuration is valid
+ * Send the same minimal connectivity test as grouter for the chosen API type.
  */
 providersRoutes.post('/detect', async (c) => {
   const body = await c.req.json<DetectBody>();
@@ -345,12 +393,14 @@ providersRoutes.post('/detect', async (c) => {
     return c.json({ error: 'baseUrl and apiKey are required' }, 400);
   }
 
-  const apiUrl = buildApiUrl(body.baseUrl);
+  const apiType = body.apiType || 'openai-completions';
   const testModel = body.model || DEFAULT_TEST_MODEL;
+  const apiUrl = buildApiUrl(body.baseUrl, apiType, testModel);
 
   console.log('[ProvidersAPI] Detecting API connection:', {
     baseUrl: body.baseUrl,
     apiUrl,
+    apiType,
     model: testModel,
   });
 
@@ -358,25 +408,55 @@ providersRoutes.post('/detect', async (c) => {
   const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${body.apiKey}`,
-      },
-      body: JSON.stringify({
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    let requestBody: Record<string, unknown>;
+
+    if (apiType === 'anthropic-messages') {
+      headers['x-api-key'] = body.apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+      requestBody = {
         model: testModel,
         messages: [{ role: 'user', content: DETECT_TEST_MESSAGE }],
         max_tokens: 1,
         stream: false,
-      }),
+      };
+    } else if (apiType === 'other') {
+      headers.Authorization = `Key ${body.apiKey}`;
+      requestBody = {
+        prompt: 'A simple blue circle on a white background',
+        num_images: 1,
+      };
+    } else {
+      headers.Authorization = `Bearer ${body.apiKey}`;
+      requestBody = {
+        model: testModel,
+        messages: [{ role: 'user', content: DETECT_TEST_MESSAGE }],
+        max_tokens: 1,
+        stream: false,
+      };
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
     if (response.ok) {
-      const data = await response.json();
+      const data: unknown = await response.json();
+      const validationError = validateTestResponse(data, apiType, testModel);
+      if (validationError) {
+        const errorResponse: DetectErrorResponse = {
+          success: false,
+          error: validationError,
+        };
+        return c.json(errorResponse, 200);
+      }
       const successResponse: DetectSuccessResponse = {
         success: true,
         message: 'Connection successful! Configuration valid',

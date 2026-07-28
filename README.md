@@ -32,10 +32,6 @@ WorkAny is a desktop AI agent application that executes tasks through natural la
 
 ![](./public/imgs/settings.png)
 
-- Use Sandbox to execute Code
-
-![](./public/imgs/sandbox.png)
-
 ## ❤️ Sponsor
 
 <a href='https://302.ai/?utm_source=workany_github' target='_blank'>
@@ -44,31 +40,25 @@ WorkAny is a desktop AI agent application that executes tasks through natural la
 
 [302.AI](https://302.ai/?utm_source=workany_github) is a pay-as-you-go AI application platform that offers the most comprehensive AI APIs and online applications available.
 
-<a href='https://platform.minimax.io/subscribe/coding-plan?code=9hgHKlPO3G&source=link' target='_blank'>
-  <img src="https://github.com/user-attachments/assets/1f925b1a-0a87-40f8-a82f-ae531181c80d" width="100%" alt="icon"/>
-</a>
-
-[MiniMax-M2.1](https://platform.minimax.io/subscribe/coding-plan?code=9hgHKlPO3G&source=link) is an open-source SOTA model that excels at coding, navigating digital environments, and handling long, multi-step tasks. Click to get an exclusive 12% off the MiniMax Coding Plan.
-
 > If you want to sponsor this project, please contact us via email: [hello@workany.ai](mailto:hello@workany.ai)
 
 ## Features
 
 - **Task Execution** - Natural language task input with real-time streaming
-- **Agent Runtime** - Powered by [Claude Code](https://github.com/anthropics/claude-code)
-- **Agent SDK** - Built on [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
-- **Sandbox** - Isolated execution via [Codex CLI](https://github.com/openai/codex)
+- **Agent Runtime** - Powered by [@codeany/open-agent-sdk](https://github.com/codeany-ai/open-agent-sdk-typescript), runs entirely in-process with no external CLI dependency
+- **30+ Built-in Tools** - File I/O, shell execution, web search, code editing, and more
+- **Sandbox** - Isolated code execution environment
 - **Artifact Preview** - Live preview for HTML/React/code files
-- **MCP Support** - Model Context Protocol server integration
+- **MCP Support** - Model Context Protocol server integration (stdio/SSE/HTTP)
 - **Skills Support** - Custom agent skills for extended capabilities
-- **Multi-provider** - OpenRouter, Anthropic, OpenAI, custom providers
+- **Multi-provider** - OpenRouter, Anthropic, OpenAI, and any compatible API endpoint
 
 ## Project Structure
 
 ```
 workany/
 ├── src/                # Frontend (React + TypeScript)
-├── src-api/            # Backend API (Hono + Claude Agent SDK)
+├── src-api/            # Backend API (Hono + @codeany/open-agent-sdk)
 └── src-tauri/          # Desktop app (Tauri + Rust)
 ```
 
@@ -77,7 +67,7 @@ workany/
 | Layer | Technologies |
 |-------|--------------|
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS 4 |
-| Backend | Hono, Claude Agent SDK, MCP SDK |
+| Backend | Hono, @codeany/open-agent-sdk, MCP SDK |
 | Desktop | Tauri 2, SQLite |
 
 
@@ -112,10 +102,6 @@ pnpm dev:web
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Acknowledgments
-
-Some components are built with [ShipAny.ai](https://shipany.ai) - AI-powered full-stack development platform.
 
 ## Community
 

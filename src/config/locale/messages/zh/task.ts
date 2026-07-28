@@ -4,6 +4,8 @@ export default {
   context: '上下文',
   showSteps: '显示 {count} 个步骤',
   hideSteps: '隐藏步骤',
+  workingSteps: '正在处理 · {count} 个步骤',
+  workedSteps: '已处理 · {count} 个步骤',
   running: '运行中',
   completed: '已完成',
   error: '错误',

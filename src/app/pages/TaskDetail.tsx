@@ -26,10 +26,10 @@ import { cn } from '@/shared/lib/utils';
 import { useLanguage } from '@/shared/providers/language-provider';
 import {
   ArrowDown,
-  CheckCircle2,
   ChevronDown,
   FileText,
   PanelLeft,
+  Pencil,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -42,18 +42,26 @@ import {
 import { Logo } from '@/components/common/logo';
 import { LeftSidebar, SidebarProvider, useSidebar } from '@/components/layout';
 import { SettingsModal } from '@/components/settings';
-import { ChatInput } from '@/components/shared/ChatInput';
+import { ChatInput, type ChatMode } from '@/components/shared/ChatInput';
 import { LazyImage } from '@/components/shared/LazyImage';
 import { PlanApproval } from '@/components/task/PlanApproval';
 import { QuestionInput } from '@/components/task/QuestionInput';
 import { RightSidebar } from '@/components/task/RightSidebar';
 import { ToolExecutionItem } from '@/components/task/ToolExecutionItem';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 interface LocationState {
   prompt?: string;
   sessionId?: string;
   taskIndex?: number;
   attachments?: MessageAttachment[];
+  mode?: ChatMode;
 }
 
 // Context for tool selection - allows child components to select tools
@@ -95,6 +103,7 @@ function TaskDetailContent() {
   const initialSessionId = state?.sessionId;
   const initialTaskIndex = state?.taskIndex || 1;
   const initialAttachments = state?.attachments;
+  const initialMode = state?.mode;
 
   const {
     messages,
@@ -110,9 +119,12 @@ function TaskDetailContent() {
     rejectPlan,
     pendingQuestion,
     respondToQuestion,
+    pendingPermission,
+    respondToPermission,
     sessionFolder,
     filesVersion,
     backgroundTasks,
+    generatedTitle,
   } = useAgent();
   const { toggleLeft, setLeftOpen } = useSidebar();
   const [hasStarted, setHasStarted] = useState(false);
@@ -255,64 +267,34 @@ function TaskDetailContent() {
   }, [stopPreview]);
 
   // Tool search
-  const [toolSearchQuery] = useState('');
 
-  // Title editing state
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [editedTitle, setEditedTitle] = useState('');
-  const titleInputRef = useRef<HTMLInputElement>(null);
+  // Title rename dialog state
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
 
-  // Handle title click to start editing
-  const handleTitleClick = useCallback(() => {
-    const currentTitle = task?.prompt || initialPrompt;
-    setEditedTitle(currentTitle);
-    setIsEditingTitle(true);
-  }, [task?.prompt, initialPrompt]);
+  const openRenameDialog = useCallback(() => {
+    setRenameValue(task?.prompt || generatedTitle || initialPrompt);
+    setRenameDialogOpen(true);
+  }, [task?.prompt, generatedTitle, initialPrompt]);
 
-  // Handle title save
-  const handleTitleSave = useCallback(async () => {
-    if (!taskId || !editedTitle.trim()) {
-      setIsEditingTitle(false);
+  const handleRenameConfirm = useCallback(async () => {
+    const trimmed = renameValue.trim();
+    if (!taskId || !trimmed) {
+      setRenameDialogOpen(false);
       return;
     }
-
-    const trimmedTitle = editedTitle.trim();
-    if (trimmedTitle !== (task?.prompt || initialPrompt)) {
-      try {
-        const updatedTask = await updateTask(taskId, { prompt: trimmedTitle });
-        if (updatedTask) {
-          setTask(updatedTask);
-          // Refresh all tasks to update sidebar
-          const tasks = await getAllTasks();
-          setAllTasks(tasks);
-        }
-      } catch (error) {
-        console.error('Failed to update task title:', error);
+    try {
+      const updatedTask = await updateTask(taskId, { prompt: trimmed });
+      if (updatedTask) {
+        setTask(updatedTask);
+        const tasks = await getAllTasks();
+        setAllTasks(tasks);
       }
+    } catch (error) {
+      console.error('Failed to rename task:', error);
     }
-    setIsEditingTitle(false);
-  }, [taskId, editedTitle, task?.prompt, initialPrompt]);
-
-  // Handle title input key down
-  const handleTitleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleTitleSave();
-      } else if (e.key === 'Escape') {
-        setIsEditingTitle(false);
-      }
-    },
-    [handleTitleSave]
-  );
-
-  // Focus title input when editing starts
-  useEffect(() => {
-    if (isEditingTitle && titleInputRef.current) {
-      titleInputRef.current.focus();
-      titleInputRef.current.select();
-    }
-  }, [isEditingTitle]);
+    setRenameDialogOpen(false);
+  }, [taskId, renameValue]);
 
   // Handle artifact selection - opens preview
   const handleSelectArtifact = useCallback((artifact: Artifact) => {
@@ -668,6 +650,22 @@ function TaskDetailContent() {
     loadAllTasks();
   }, [task, taskId]);
 
+  // Update UI immediately when a generated title arrives
+  useEffect(() => {
+    if (generatedTitle && taskId) {
+      // Update current task state
+      setTask((prev) =>
+        prev && prev.id === taskId ? { ...prev, prompt: generatedTitle } : prev
+      );
+      // Update sidebar task list
+      setAllTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId ? { ...t, prompt: generatedTitle } : t
+        )
+      );
+    }
+  }, [generatedTitle, taskId]);
+
   // Handle task deletion from sidebar
   const handleDeleteTask = async (id: string) => {
     try {
@@ -691,6 +689,23 @@ function TaskDetailContent() {
       );
     } catch (error) {
       console.error('Failed to update task:', error);
+    }
+  };
+
+  // Handle rename from sidebar
+  const handleRenameTask = async (id: string, newTitle: string) => {
+    try {
+      const updatedTask = await updateTask(id, { prompt: newTitle });
+      if (updatedTask) {
+        setAllTasks((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, prompt: newTitle } : t))
+        );
+        if (id === taskId) {
+          setTask(updatedTask);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to rename task:', error);
     }
   };
 
@@ -771,7 +786,13 @@ function TaskDetailContent() {
         const sessionInfo = initialSessionId
           ? { sessionId: initialSessionId, taskIndex: initialTaskIndex }
           : undefined;
-        await runAgent(initialPrompt, taskId, sessionInfo, initialAttachments);
+        await runAgent(
+          initialPrompt,
+          taskId,
+          sessionInfo,
+          initialAttachments,
+          initialMode
+        );
         const newTask = await loadTask(taskId);
         setTask(newTask);
       } else {
@@ -786,20 +807,25 @@ function TaskDetailContent() {
 
   // Handle reply submission from ChatInput
   const handleReply = useCallback(
-    async (text: string, messageAttachments?: MessageAttachment[]) => {
+    async (
+      text: string,
+      messageAttachments?: MessageAttachment[],
+      mode?: ChatMode
+    ) => {
       if (
         (text.trim() ||
           (messageAttachments && messageAttachments.length > 0)) &&
         !isRunning &&
         taskId
       ) {
-        await continueConversation(text.trim(), messageAttachments);
+        await continueConversation(text.trim(), messageAttachments, mode);
       }
     },
     [isRunning, taskId, continueConversation]
   );
 
-  const displayPrompt = task?.prompt || initialPrompt;
+  const displayTitle = task?.prompt || generatedTitle || initialPrompt;
+  const displayPrompt = initialPrompt || task?.prompt || '';
 
   // Get attachments for the initial user message:
   // 1. From navigation state (first navigation from home page)
@@ -845,6 +871,7 @@ function TaskDetailContent() {
           currentTaskId={taskId}
           onDeleteTask={handleDeleteTask}
           onToggleFavorite={handleToggleFavorite}
+          onRenameTask={handleRenameTask}
           runningTaskIds={[
             ...backgroundTasks.filter((t) => t.isRunning).map((t) => t.taskId),
             // Include current task if it's running
@@ -881,33 +908,18 @@ function TaskDetailContent() {
                 <PanelLeft className="size-5" />
               </button>
 
-              <div className="min-w-0 flex-1">
-                {isEditingTitle ? (
-                  <input
-                    ref={titleInputRef}
-                    type="text"
-                    value={editedTitle}
-                    onChange={(e) => setEditedTitle(e.target.value)}
-                    onBlur={handleTitleSave}
-                    onKeyDown={handleTitleKeyDown}
-                    className="text-foreground border-primary/50 focus:border-primary focus:ring-primary/30 max-w-full rounded-md border bg-transparent px-2 py-1 text-sm font-normal outline-none focus:ring-1"
-                    style={{
-                      width: `${Math.min(
-                        Math.max(editedTitle.length + 2, 20),
-                        50
-                      )}ch`,
-                    }}
-                  />
-                ) : (
-                  <h1
-                    onClick={handleTitleClick}
-                    className="text-foreground hover:bg-accent/50 inline-block max-w-full cursor-pointer truncate rounded-md px-2 py-1 text-sm font-normal transition-colors"
-                    title="Click to edit title"
-                  >
-                    {displayPrompt.slice(0, 40) || `Task ${taskId}`}
-                    {displayPrompt.length > 40 && '...'}
-                  </h1>
-                )}
+              <div className="group/title flex min-w-0 flex-1 items-center gap-1">
+                <h1 className="text-foreground inline-block max-w-full truncate px-2 py-1 text-sm font-normal">
+                  {displayTitle.slice(0, 40) || `Task ${taskId}`}
+                  {displayTitle.length > 40 && '...'}
+                </h1>
+                <button
+                  onClick={openRenameDialog}
+                  className="text-muted-foreground hover:text-foreground shrink-0 opacity-0 transition-opacity group-hover/title:opacity-100"
+                  title={t.common.rename}
+                >
+                  <Pencil className="size-3.5" />
+                </button>
               </div>
 
               {isRunning && (
@@ -933,7 +945,7 @@ function TaskDetailContent() {
             <div
               ref={messagesContainerRef}
               className={cn(
-                'relative flex-1 overflow-x-hidden overflow-y-auto',
+                'scrollbar-soft relative flex-1 overflow-x-hidden overflow-y-auto',
                 !isPreviewVisible &&
                   !isRightSidebarVisible &&
                   'flex justify-center'
@@ -964,7 +976,6 @@ function TaskDetailContent() {
                     <MessageList
                       messages={messages}
                       isRunning={isRunning}
-                      searchQuery={toolSearchQuery}
                       phase={phase}
                       onApprovePlan={approvePlan}
                       onRejectPlan={rejectPlan}
@@ -978,6 +989,43 @@ function TaskDetailContent() {
                         pendingQuestion={pendingQuestion}
                         onSubmit={respondToQuestion}
                       />
+                    )}
+
+                    {pendingPermission && (
+                      <div className="border-border bg-card mx-auto w-full max-w-xl rounded-xl border p-4 shadow-sm">
+                        <div className="text-foreground text-sm font-medium">
+                          {pendingPermission.tool}
+                        </div>
+                        <p className="text-muted-foreground mt-1 text-sm">
+                          {pendingPermission.description}
+                        </p>
+                        <div className="mt-4 flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void respondToPermission(
+                                pendingPermission.id,
+                                false
+                              )
+                            }
+                            className="border-input hover:bg-accent h-9 rounded-lg border px-3 text-sm font-medium"
+                          >
+                            Deny
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void respondToPermission(
+                                pendingPermission.id,
+                                true
+                              )
+                            }
+                            className="bg-foreground text-background hover:bg-foreground/90 h-9 rounded-lg px-3 text-sm font-medium"
+                          >
+                            Allow once
+                          </button>
+                        </div>
+                      </div>
                     )}
 
                     <div ref={messagesEndRef} />
@@ -1017,6 +1065,7 @@ function TaskDetailContent() {
                   isRunning={isRunning}
                   onSubmit={handleReply}
                   onStop={stopAgent}
+                  defaultMode={initialMode}
                 />
               </div>
             </div>
@@ -1071,6 +1120,42 @@ function TaskDetailContent() {
           </div>
         </div>
       </div>
+      {/* Rename dialog */}
+      <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>{t.common.rename}</DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <label className="text-sm font-medium">{t.common.taskTitle}</label>
+            <input
+              type="text"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRenameConfirm();
+              }}
+              autoFocus
+              className="border-border focus:border-primary focus:ring-primary/30 mt-1.5 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1"
+            />
+          </div>
+          <DialogFooter>
+            <button
+              onClick={() => setRenameDialogOpen(false)}
+              className="border-border hover:bg-accent rounded-lg border px-4 py-2 text-sm transition-colors"
+            >
+              {t.common.cancel}
+            </button>
+            <button
+              onClick={handleRenameConfirm}
+              disabled={!renameValue.trim()}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg px-4 py-2 text-sm transition-colors disabled:opacity-50"
+            >
+              {t.common.confirm}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ToolSelectionContext.Provider>
   );
 }
@@ -1137,14 +1222,12 @@ function UserMessage({
 function MessageList({
   messages,
   isRunning,
-  searchQuery,
   phase,
   onApprovePlan,
   onRejectPlan,
 }: {
   messages: AgentMessage[];
   isRunning: boolean;
-  searchQuery?: string;
   phase?: string;
   onApprovePlan?: () => void;
   onRejectPlan?: () => void;
@@ -1216,18 +1299,25 @@ function MessageList({
     }
   }
 
-  // Collect all tool_result messages in order for matching with tool_use
+  // Prefer the protocol call id when pairing results. The ordered list is only
+  // a compatibility fallback for older persisted sessions without ids.
   const toolResultMessages: AgentMessage[] = [];
+  const toolResultsById = new Map<string, AgentMessage>();
   mergedMessages.forEach((msg) => {
     if (msg.type === 'tool_result') {
       toolResultMessages.push(msg);
+      if (msg.toolUseId) {
+        toolResultsById.set(msg.toolUseId, msg);
+      }
     }
   });
 
-  // Match tool_use with tool_result by index (they come in pairs)
-  const getToolResult = (toolUseIndex: number): AgentMessage | undefined => {
-    return toolResultMessages[toolUseIndex];
-  };
+  const getToolResult = (
+    message: AgentMessage,
+    toolUseIndex: number
+  ): AgentMessage | undefined =>
+    (message.id ? toolResultsById.get(message.id) : undefined) ||
+    toolResultMessages[toolUseIndex];
 
   // Filter out duplicate plan messages - only keep the last one
   const lastPlanIdx = mergedMessages.reduce(
@@ -1332,8 +1422,7 @@ function MessageList({
         pendingTextMessage = null;
       }
       const group = ensureCurrentGroup();
-      // Find associated tool_result by index
-      const result = getToolResult(toolUseIndex);
+      const result = getToolResult(message, toolUseIndex);
       group.tools.push({ message, globalIndex: toolGlobalIndex++, result });
       toolUseIndex++;
     } else if (message.type === 'tool_result') {
@@ -1396,7 +1485,6 @@ function MessageList({
               tools={group.tools}
               isCompleted={group.isCompleted}
               isRunning={isRunning}
-              searchQuery={searchQuery}
             />
           );
         }
@@ -1421,7 +1509,6 @@ function TaskGroupComponent({
   tools,
   isCompleted,
   isRunning,
-  searchQuery,
 }: {
   title: string;
   description: string;
@@ -1432,7 +1519,6 @@ function TaskGroupComponent({
   }[];
   isCompleted: boolean;
   isRunning: boolean;
-  searchQuery?: string;
 }) {
   const { t } = useLanguage();
   // Default: collapsed when completed, expanded when running or in progress
@@ -1445,61 +1531,49 @@ function TaskGroupComponent({
     }
   }, [isCompleted, isRunning]);
 
+  const isActivelyRunning = isRunning && !isCompleted;
+
   return (
-    <div className="min-w-0 space-y-3">
-      {/* Task description with Logo */}
+    <div className="min-w-0">
       {description && (
-        <div className="flex min-w-0 flex-col gap-2">
-          <div className="flex min-w-0 items-start gap-2">
-            {isCompleted ? (
-              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
-            ) : (
-              <div className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
-                <div className="bg-primary size-2 animate-pulse rounded-full" />
-              </div>
-            )}
-            <span className="text-foreground line-clamp-2 min-w-0 text-sm font-medium break-words">
-              {title}
-            </span>
-          </div>
-        </div>
+        <p className="text-muted-foreground mb-2 line-clamp-2 min-w-0 text-[13px] leading-5 break-words">
+          {title}
+        </p>
       )}
 
-      {/* Collapsible tool list */}
       {tools.length > 0 && (
-        <div className="border-border/40 bg-accent/20 min-w-0 overflow-hidden rounded-xl border">
-          {/* Header */}
+        <div className="min-w-0">
           <button
+            type="button"
             onClick={() => setIsExpanded(!isExpanded)}
-            className="text-muted-foreground hover:text-foreground hover:bg-accent/30 flex w-full cursor-pointer items-center gap-2 px-4 py-2.5 text-sm transition-colors"
+            disabled={isActivelyRunning}
+            className="text-muted-foreground hover:text-foreground disabled:hover:text-muted-foreground inline-flex items-center gap-1.5 bg-transparent p-0 text-xs transition-colors disabled:cursor-default"
           >
             <ChevronDown
               className={cn(
-                'size-4 shrink-0 transition-transform',
+                'size-3 shrink-0 transition-transform',
                 !isExpanded && '-rotate-90'
               )}
             />
-            <span className="flex-1 text-left">
-              {isExpanded
-                ? t.task.hideSteps
-                : t.task.showSteps.replace('{count}', String(tools.length))}
+            <span>
+              {(isActivelyRunning
+                ? t.task.workingSteps
+                : t.task.workedSteps
+              ).replace('{count}', String(tools.length))}
             </span>
           </button>
 
-          {/* Tool list */}
           {isExpanded && (
-            <div className="px-2 pb-2">
-              {tools.map(({ message, globalIndex, result }, index) => (
+            <div className="mt-2 flex min-w-0 flex-col gap-1.5">
+              {tools.map(({ message, globalIndex, result }) => (
                 <ToolExecutionItem
                   key={globalIndex}
                   message={message}
                   result={result}
-                  isFirst={index === 0}
                   isLast={
                     globalIndex === tools[tools.length - 1].globalIndex &&
-                    isRunning
+                    isActivelyRunning
                   }
-                  searchQuery={searchQuery}
                 />
               ))}
             </div>
@@ -1562,7 +1636,7 @@ function MessageItem({
                 if (isInline) {
                   return (
                     <code
-                      className="bg-muted rounded px-1.5 py-0.5 text-sm"
+                      className="bg-muted/55 text-foreground/90 rounded-md px-1.5 py-0.5 font-mono text-[0.9em] font-medium before:content-none after:content-none"
                       {...props}
                     >
                       {children}
@@ -1598,21 +1672,23 @@ function MessageItem({
               ),
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               table: ({ children }: any) => (
-                <div className="overflow-x-auto">
-                  <table className="border-border border-collapse border">
+                <div className="border-border/70 my-4 overflow-x-auto rounded-xl border">
+                  <table className="my-0 w-full min-w-[36rem] border-separate border-spacing-0 text-sm [&_tr:last-child_td]:border-b-0">
                     {children}
                   </table>
                 </div>
               ),
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               th: ({ children }: any) => (
-                <th className="border-border bg-muted border px-3 py-2 text-left">
+                <th className="border-border/60 bg-muted/35 text-muted-foreground border-r border-b px-4 py-2.5 text-left text-xs font-medium tracking-wide last:border-r-0">
                   {children}
                 </th>
               ),
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               td: ({ children }: any) => (
-                <td className="border-border border px-3 py-2">{children}</td>
+                <td className="border-border/50 border-r border-b px-4 py-3 align-top leading-6 last:border-r-0 [&_p]:m-0">
+                  {children}
+                </td>
               ),
             }}
           >
@@ -1753,7 +1829,9 @@ function ErrorMessage({ message }: { message: string }) {
     const errorMessage = (
       t.common.errors.customApiError ||
       'Custom API ({baseUrl}) may not be compatible with Claude Code SDK. Please check the API configuration or try a different provider. Log file: {logPath}'
-    ).replace('{baseUrl}', baseUrl).replace('{logPath}', logPath);
+    )
+      .replace('{baseUrl}', baseUrl)
+      .replace('{logPath}', logPath);
 
     return (
       <div className="flex items-start gap-3 py-2">

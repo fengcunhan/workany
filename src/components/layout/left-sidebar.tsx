@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import ImageLogo from '@/assets/logo.png';
 import type { Task } from '@/shared/db';
 import { getSettings, type UserProfile } from '@/shared/db/settings';
@@ -14,7 +14,7 @@ import {
   Loader2,
   MoreHorizontal,
   PanelLeft,
-  PanelLeftOpen,
+  Pencil,
   Settings,
   Smartphone,
   Sparkles,
@@ -25,6 +25,13 @@ import {
 } from 'lucide-react';
 
 import { SettingsModal } from '@/components/settings';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,6 +55,7 @@ interface LeftSidebarProps {
   currentTaskId?: string;
   onDeleteTask?: (taskId: string) => void;
   onToggleFavorite?: (taskId: string, favorite: boolean) => void;
+  onRenameTask?: (taskId: string, newTitle: string) => void;
   runningTaskIds?: string[]; // Tasks running in background
 }
 
@@ -123,9 +131,11 @@ export function LeftSidebar({
   currentTaskId,
   onDeleteTask,
   onToggleFavorite,
+  onRenameTask,
   runningTaskIds = [],
 }: LeftSidebarProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const { leftOpen, toggleLeft } = useSidebar();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profile, setProfile] = useState<UserProfile>({
@@ -137,6 +147,14 @@ export function LeftSidebar({
   // Delete confirmation dialog state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [taskToDelete, setTaskToDelete] = useState<string | null>(null);
+
+  // Rename dialog state
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [taskToRename, setTaskToRename] = useState<{
+    id: string;
+    prompt: string;
+  } | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   // Loading state for task switching
   const [loadingTaskId, setLoadingTaskId] = useState<string | null>(null);
@@ -163,6 +181,22 @@ export function LeftSidebar({
     if (onToggleFavorite) {
       onToggleFavorite(task.id, !task.favorite);
     }
+  };
+
+  const handleRenameClick = (task: Task, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setTaskToRename({ id: task.id, prompt: task.prompt });
+    setRenameValue(task.prompt);
+    setRenameDialogOpen(true);
+  };
+
+  const handleConfirmRename = () => {
+    const trimmed = renameValue.trim();
+    if (trimmed && taskToRename && onRenameTask) {
+      onRenameTask(taskToRename.id, trimmed);
+    }
+    setRenameDialogOpen(false);
+    setTaskToRename(null);
   };
 
   // Load profile from settings
@@ -204,62 +238,64 @@ export function LeftSidebar({
 
   // Hover state for showing task list popup
   const [showTasksPopup, setShowTasksPopup] = useState(false);
-  // Hover state for logo expand button
-  const [logoHovered, setLogoHovered] = useState(false);
-
   return (
     <TooltipProvider delayDuration={0}>
       <aside
         className={cn(
-          'border-sidebar-border bg-sidebar flex h-full shrink-0 flex-col border-none transition-all duration-300',
-          leftOpen ? 'w-72' : 'w-14'
+          'bg-sidebar flex h-full shrink-0 flex-col transition-all duration-300',
+          leftOpen ? 'w-60' : 'w-14'
         )}
       >
         {leftOpen ? (
           <>
             {/* Expanded State */}
             {/* Logo & Toggle */}
-            <div className="flex shrink-0 items-center justify-between gap-3 p-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex size-9 items-center justify-center rounded-xl">
-                  <img
-                    src={ImageLogo}
-                    alt="WorkAny"
-                    className="text-primary size-9"
-                  />
+            <div className="flex shrink-0 items-center justify-between gap-3 px-3 pt-3 pb-2">
+              <div className="flex min-w-0 items-center gap-2.5 px-1">
+                <div className="flex size-7 shrink-0 items-center justify-center">
+                  <img src={ImageLogo} alt="WorkAny" className="size-7" />
                 </div>
-                <span className="text-sidebar-foreground font-mono text-lg font-medium tracking-wide">
+                <span className="text-sidebar-foreground truncate text-[15px] font-semibold tracking-tight">
                   WorkAny
                 </span>
               </div>
               <button
                 onClick={toggleLeft}
-                className="text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground flex size-8 cursor-pointer items-center justify-center rounded-lg transition-colors duration-200"
+                className="text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-foreground flex size-7 cursor-pointer items-center justify-center rounded-md transition-colors"
+                aria-label="Collapse sidebar"
               >
                 <PanelLeft className="size-4" />
               </button>
             </div>
 
             {/* Navigation Items */}
-            <nav className="flex shrink-0 flex-col gap-1 px-3">
+            <nav className="flex shrink-0 flex-col gap-0.5 px-2 pt-2">
               <NavItem
                 icon={SquarePen}
                 label={t.nav.newTask}
                 collapsed={false}
                 onClick={handleNewTask}
+                active={location.pathname === '/'}
+              />
+              <NavItem
+                icon={ListTodo}
+                label={t.nav.allTasks}
+                collapsed={false}
+                onClick={() => navigate('/library')}
+                active={location.pathname === '/library'}
               />
             </nav>
 
             {/* Tasks Section */}
-            <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden px-3">
-              <div className="flex shrink-0 items-center justify-between px-2 py-1.5">
-                <span className="text-sidebar-foreground/50 text-xs font-medium tracking-wider">
-                  {t.nav.allTasks}
+            <div className="mt-5 flex min-h-0 flex-1 flex-col overflow-hidden px-2">
+              <div className="flex shrink-0 items-center justify-between px-2 py-1">
+                <span className="text-sidebar-foreground/45 text-xs font-medium">
+                  {t.nav.recent}
                 </span>
               </div>
 
-              <div className="scrollbar-hide mt-1 flex-1 space-y-0.5 overflow-y-auto">
-                {tasks.slice(0, 10).map((task) => {
+              <div className="scrollbar-hide mt-1 flex-1 space-y-px overflow-y-auto">
+                {tasks.slice(0, 12).map((task) => {
                   const TaskIcon = getTaskIcon(task.prompt);
                   const isRunningInBackground = runningTaskIds.includes(
                     task.id
@@ -269,19 +305,19 @@ export function LeftSidebar({
                     <div
                       key={task.id}
                       className={cn(
-                        'group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 transition-all duration-200',
+                        'group relative flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 transition-colors',
                         currentTaskId === task.id || isLoading
-                          ? 'bg-sidebar-accent text-sidebar-accent-foreground shadow-sm'
-                          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                          ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/55 hover:text-sidebar-foreground',
                         isLoading && 'opacity-70'
                       )}
                       onClick={() => handleSelectTask(task.id)}
                     >
                       <div className="relative shrink-0">
                         {isLoading ? (
-                          <Loader2 className="size-4 animate-spin" />
+                          <Loader2 className="size-3.5 animate-spin" />
                         ) : (
-                          <TaskIcon className="size-4" />
+                          <TaskIcon className="text-sidebar-foreground/50 size-3.5" />
                         )}
                         {/* Running indicator */}
                         {isRunningInBackground && !isLoading && (
@@ -291,29 +327,33 @@ export function LeftSidebar({
                           </span>
                         )}
                       </div>
-                      <span className="min-w-0 flex-1 truncate text-sm">
+                      <span className="min-w-0 flex-1 truncate text-[13px]">
                         {task.prompt}
                       </span>
                       {/* Running indicator for running tasks, dropdown menu for completed tasks */}
                       {isRunningInBackground ? (
-                        <div className="flex size-6 shrink-0 items-center justify-center">
-                          <Loader2 className="text-primary size-4 animate-spin" />
+                        <div className="flex size-5 shrink-0 items-center justify-center">
+                          <Loader2 className="text-primary size-3.5 animate-spin" />
                         </div>
                       ) : (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <button
+                              type="button"
                               onClick={(e) => e.stopPropagation()}
-                              className="flex size-6 shrink-0 items-center justify-center rounded transition-all"
+                              className={cn(
+                                'hover:bg-sidebar-accent flex size-5 shrink-0 items-center justify-center rounded transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100',
+                                task.favorite ? 'opacity-100' : 'opacity-0'
+                              )}
                             >
                               {/* Show star when favorited (hide on hover), show menu icon on hover */}
                               {task.favorite ? (
                                 <>
-                                  <Star className="size-4 fill-amber-400 text-amber-400 group-hover:hidden" />
-                                  <MoreHorizontal className="text-sidebar-foreground/40 hover:text-sidebar-foreground hidden size-4 group-hover:block" />
+                                  <Star className="size-3.5 fill-amber-400 text-amber-400 group-hover:hidden" />
+                                  <MoreHorizontal className="text-sidebar-foreground/40 hover:text-sidebar-foreground hidden size-3.5 group-hover:block" />
                                 </>
                               ) : (
-                                <MoreHorizontal className="text-sidebar-foreground/40 hover:text-sidebar-foreground size-4 opacity-0 group-hover:opacity-100" />
+                                <MoreHorizontal className="text-sidebar-foreground/40 hover:text-sidebar-foreground size-3.5" />
                               )}
                             </button>
                           </DropdownMenuTrigger>
@@ -339,6 +379,13 @@ export function LeftSidebar({
                                   : t.common.favorite}
                               </span>
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="cursor-pointer"
+                              onClick={(e) => handleRenameClick(task, e)}
+                            >
+                              <Pencil className="size-4" />
+                              <span>{t.common.rename}</span>
+                            </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               className="cursor-pointer text-red-500 focus:text-red-500"
@@ -353,23 +400,28 @@ export function LeftSidebar({
                     </div>
                   );
                 })}
-                {tasks.length > 10 && (
+                {tasks.length === 0 && (
+                  <p className="text-sidebar-foreground/40 px-2 py-3 text-[13px]">
+                    {t.nav.noTasksYet}
+                  </p>
+                )}
+                {tasks.length > 12 && (
                   <button
                     onClick={() => navigate('/library')}
-                    className="text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 transition-colors"
+                    className="text-sidebar-foreground/45 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 flex h-8 w-full cursor-pointer items-center rounded-md px-2 transition-colors"
                   >
-                    <span className="text-sm">{t.common.more}</span>
+                    <span className="text-[13px]">{t.common.more}</span>
                   </button>
                 )}
               </div>
             </div>
 
             {/* Bottom Section - Avatar with Dropdown */}
-            <div className="border-sidebar-border mt-auto shrink-0 border-none p-3">
+            <div className="mt-auto shrink-0 p-2">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="hover:bg-sidebar-accent group flex w-full cursor-pointer items-center gap-3 rounded-lg p-2 transition-colors duration-200">
-                    <div className="bg-sidebar-accent flex size-9 items-center justify-center overflow-hidden rounded-lg">
+                  <button className="hover:bg-sidebar-accent group flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-md px-2 transition-colors">
+                    <div className="bg-sidebar-accent flex size-7 items-center justify-center overflow-hidden rounded-full">
                       {profile.avatar ? (
                         <img
                           src={profile.avatar}
@@ -377,15 +429,15 @@ export function LeftSidebar({
                           className="size-full object-cover"
                         />
                       ) : (
-                        <User className="text-sidebar-foreground/70 size-5" />
+                        <User className="text-sidebar-foreground/70 size-4" />
                       )}
                     </div>
                     <div className="min-w-0 flex-1 text-left">
-                      <p className="text-sidebar-foreground truncate text-sm font-medium">
+                      <p className="text-sidebar-foreground truncate text-[13px] font-medium">
                         {profile.nickname || 'Guest User'}
                       </p>
                     </div>
-                    <ChevronsUpDown className="text-sidebar-foreground/40 group-hover:text-sidebar-foreground/60 size-4" />
+                    <ChevronsUpDown className="text-sidebar-foreground/35 group-hover:text-sidebar-foreground/60 size-3.5" />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
@@ -435,16 +487,9 @@ export function LeftSidebar({
             <div className="flex shrink-0 items-center justify-center p-3">
               <button
                 onClick={toggleLeft}
-                onMouseEnter={() => setLogoHovered(true)}
-                onMouseLeave={() => setLogoHovered(false)}
                 className="hover:bg-sidebar-accent relative flex size-9 cursor-pointer items-center justify-center rounded-xl transition-all duration-200"
               >
-                {logoHovered ? (
-                  // <PanelLeftOpen className="text-sidebar-foreground size-5" />
-                  <img src={ImageLogo} alt="WorkAny" className="size-9" />
-                ) : (
-                  <img src={ImageLogo} alt="WorkAny" className="size-9" />
-                )}
+                <img src={ImageLogo} alt="WorkAny" className="size-9" />
               </button>
             </div>
 
@@ -584,6 +629,15 @@ export function LeftSidebar({
                                               : t.common.favorite}
                                           </span>
                                         </DropdownMenuItem>
+                                        <DropdownMenuItem
+                                          className="cursor-pointer"
+                                          onClick={(e) =>
+                                            handleRenameClick(task, e)
+                                          }
+                                        >
+                                          <Pencil className="size-4" />
+                                          <span>{t.common.rename}</span>
+                                        </DropdownMenuItem>
                                         <DropdownMenuSeparator />
                                         <DropdownMenuItem
                                           className="cursor-pointer text-red-500 focus:text-red-500"
@@ -690,6 +744,43 @@ export function LeftSidebar({
         onConfirm={handleConfirmDelete}
         t={t}
       />
+
+      {/* Rename dialog */}
+      <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>{t.common.rename}</DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <label className="text-sm font-medium">{t.common.taskTitle}</label>
+            <input
+              type="text"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleConfirmRename();
+              }}
+              autoFocus
+              className="border-border focus:border-primary focus:ring-primary/30 mt-1.5 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1"
+            />
+          </div>
+          <DialogFooter>
+            <button
+              onClick={() => setRenameDialogOpen(false)}
+              className="border-border hover:bg-accent rounded-lg border px-4 py-2 text-sm transition-colors"
+            >
+              {t.common.cancel}
+            </button>
+            <button
+              onClick={handleConfirmRename}
+              disabled={!renameValue.trim()}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg px-4 py-2 text-sm transition-colors disabled:opacity-50"
+            >
+              {t.common.confirm}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </TooltipProvider>
   );
 }
@@ -740,15 +831,16 @@ function NavItem({
 
   return (
     <button
+      type="button"
       onClick={onClick}
       className={cn(
-        'flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200',
+        'flex h-9 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] transition-colors',
         active
-          ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold shadow-sm'
-          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'
+          ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+          : 'text-sidebar-foreground/75 hover:bg-sidebar-accent/55 hover:text-sidebar-foreground'
       )}
     >
-      <Icon className="size-5" />
+      <Icon className="size-4 shrink-0" />
       <span className="flex-1 text-left">{label}</span>
       {shortcut && (
         <span className="text-sidebar-foreground/40 text-xs">{shortcut}</span>

@@ -7,7 +7,6 @@
 
 import {
   createAgent,
-  createAgentFromEnv,
   type AgentConfig,
   type AgentMessage,
   type AgentSession,
@@ -19,6 +18,11 @@ import {
   type SkillsConfig,
   type TaskPlan,
 } from '@/core/agent';
+
+import { getProviderManager } from '@/shared/provider/manager';
+import { DEFAULT_AGENT_PROVIDER } from '@/config/constants';
+import { nanoid } from 'nanoid';
+
 // ============================================================================
 // Logging - uses shared logger (writes to ~/.workany/logs/workany.log)
 // ============================================================================
@@ -39,13 +43,20 @@ const globalPlanStore = new Map<string, TaskPlan>();
  * Get or create the global agent instance
  * If modelConfig is provided, creates a new agent with those settings
  */
-export function getAgent(config?: Partial<AgentConfig>): IAgent {
+export async function getAgent(config?: Partial<AgentConfig>): Promise<IAgent> {
   console.log('[AgentService] getAgent called with config:', {
     hasConfig: !!config,
     hasApiKey: !!config?.apiKey,
     hasBaseUrl: !!config?.baseUrl,
     model: config?.model,
   });
+
+  // Get current active agent provider from ProviderManager
+  const providerManager = getProviderManager();
+  const currentAgentConfig = providerManager.getConfig().agent;
+  const currentProvider = currentAgentConfig?.type || DEFAULT_AGENT_PROVIDER;
+
+  console.log('[AgentService] Using current agent provider:', currentProvider);
 
   // If config with API credentials is provided, create a new agent instance
   // Don't cache it to allow different configs per request
@@ -55,15 +66,17 @@ export function getAgent(config?: Partial<AgentConfig>): IAgent {
       baseUrl: config.baseUrl,
       model: config.model,
     });
-    return createAgent({ provider: 'claude', ...config });
+    return createAgent({ provider: currentProvider as any, ...config });
   }
 
   // Use cached global agent for default configuration
   if (!globalAgent || config) {
-    console.log('[AgentService] Creating agent from environment variables');
-    globalAgent = config
-      ? createAgent({ provider: 'claude', ...config })
-      : createAgentFromEnv();
+    console.log('[AgentService] Creating agent with current provider:', currentProvider);
+    globalAgent = createAgent({
+      provider: currentProvider as any,
+      ...(config || {}),
+      workDir: config?.workDir || '~/.workany'
+    });
   }
   return globalAgent;
 }
@@ -75,7 +88,7 @@ export function createSession(
   phase: 'plan' | 'execute' = 'plan'
 ): AgentSession {
   const session: AgentSession = {
-    id: Date.now().toString(),
+    id: nanoid(),
     createdAt: new Date(),
     phase: phase === 'plan' ? 'planning' : 'executing',
     isAborted: false,
@@ -148,13 +161,15 @@ export function deletePlan(planId: string): boolean {
 export async function* runPlanningPhase(
   prompt: string,
   session: AgentSession,
-  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string }
+  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string; apiType?: 'anthropic-messages' | 'openai-completions' | 'other' },
+  language?: string
 ): AsyncGenerator<AgentMessage> {
-  const agent = getAgent(modelConfig);
+  const agent = await getAgent(modelConfig as Partial<AgentConfig>);
 
   for await (const message of agent.plan(prompt, {
     sessionId: session.id,
     abortController: session.abortController,
+    language,
   })) {
     // Intercept plan messages and save to global store
     if (message.type === 'plan' && message.plan) {
@@ -173,12 +188,13 @@ export async function* runExecutionPhase(
   originalPrompt: string,
   workDir?: string,
   taskId?: string,
-  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string },
+  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string; apiType?: 'anthropic-messages' | 'openai-completions' | 'other' },
   sandboxConfig?: SandboxConfig,
   skillsConfig?: SkillsConfig,
-  mcpConfig?: McpConfig
+  mcpConfig?: McpConfig,
+  language?: string
 ): AsyncGenerator<AgentMessage> {
-  const agent = getAgent(modelConfig);
+  const agent = await getAgent(modelConfig);
 
   // Get the plan from global store to pass to agent
   // This is necessary because each agent instance has its own plan store
@@ -211,6 +227,7 @@ export async function* runExecutionPhase(
     sandbox: sandboxConfig,
     skillsConfig,
     mcpConfig,
+    language,
   })) {
     yield message;
   }
@@ -225,13 +242,14 @@ export async function* runAgent(
   conversation?: ConversationMessage[],
   workDir?: string,
   taskId?: string,
-  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string },
+  modelConfig?: { apiKey?: string; baseUrl?: string; model?: string; apiType?: 'anthropic-messages' | 'openai-completions' | 'other' },
   sandboxConfig?: SandboxConfig,
   images?: ImageAttachment[],
   skillsConfig?: SkillsConfig,
-  mcpConfig?: McpConfig
+  mcpConfig?: McpConfig,
+  language?: string
 ): AsyncGenerator<AgentMessage> {
-  const agent = getAgent(modelConfig);
+  const agent = await getAgent(modelConfig);
 
   // Log sandbox config for debugging - write to file for packaged app visibility
   serviceLogger.info('[AgentService] runAgent called with sandbox config:', {
@@ -253,6 +271,7 @@ export async function* runAgent(
     images,
     skillsConfig,
     mcpConfig,
+    language,
   })) {
     yield message;
   }

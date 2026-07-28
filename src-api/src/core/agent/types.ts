@@ -31,12 +31,14 @@ export type AgentMessageType =
   | 'error'
   | 'done'
   | 'plan'
-  | 'direct_answer';
+  | 'direct_answer'
+  | 'permission_request';
 
 export interface AgentMessage {
   type: AgentMessageType;
   sessionId?: string;
   content?: string;
+  isDelta?: boolean;
   name?: string;
   id?: string;
   input?: unknown;
@@ -50,6 +52,13 @@ export interface AgentMessage {
   plan?: TaskPlan;
   // Error fields
   message?: string;
+  permission?: {
+    id: string;
+    tool: string;
+    command?: string;
+    description: string;
+    risk_level?: 'low' | 'medium' | 'high';
+  };
 }
 
 export interface ConversationMessage {
@@ -89,7 +98,7 @@ export interface PlanStep {
 // Agent Configuration
 // ============================================================================
 
-export type AgentProvider = 'claude' | 'codex' | 'deepagents' | 'custom';
+export type AgentProvider = 'codeany' | 'custom';
 
 export interface AgentConfig {
   /** Agent provider to use */
@@ -100,6 +109,8 @@ export interface AgentConfig {
   baseUrl?: string;
   /** Model to use (provider-specific) */
   model?: string;
+  /** API type: 'anthropic-messages' or 'openai-completions' */
+  apiType?: 'anthropic-messages' | 'openai-completions' | 'other';
   /** Working directory for file operations */
   workDir?: string;
   /** Custom configuration for the provider */
@@ -139,6 +150,8 @@ export interface AgentOptions {
   sessionId?: string;
   /** Conversation history */
   conversation?: ConversationMessage[];
+  /** Preferred response language (e.g., en-US, zh-CN) */
+  language?: string;
   /** Working directory */
   cwd?: string;
   /** Allowed tools */
@@ -284,7 +297,7 @@ export interface AgentRequest {
   workDir?: string; // Working directory for session outputs
   taskId?: string; // Task ID for session folder
   // Provider selection (optional, defaults to env config)
-  provider?: 'claude' | 'deepagents';
+  provider?: 'codeany' | 'kimi';
   // Custom model configuration
   modelConfig?: ModelConfig;
   // Sandbox configuration for isolated execution

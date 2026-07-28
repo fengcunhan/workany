@@ -6,6 +6,7 @@ import {
   providerDefaultModels,
 } from '@/shared/db/settings';
 import {
+  Bot,
   Cpu,
   Database,
   FolderOpen,
@@ -28,6 +29,7 @@ export const categoryIcons: Record<
   general: Settings,
   workplace: FolderOpen,
   model: Cpu,
+  agent: Bot,
   mcp: Server,
   skills: Sparkles,
   connector: Plug,
